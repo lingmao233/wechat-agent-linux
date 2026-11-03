@@ -99,7 +99,7 @@ def synthesize_group_profile(
         raw = llm.complete(_system_prompt(llm), transcript, temperature=0.2, max_tokens=8_000)
     except Exception:
         return {}
-    cleaned = _clean(_parse(raw))
+    cleaned = _clean(_parse(raw), llm=llm)
     if cleaned:
         return cleaned
     # Reasoning-heavy models can spend the whole completion budget before
@@ -109,7 +109,7 @@ def synthesize_group_profile(
         raw = llm.complete(_RETRY, transcript[-3_000:], temperature=0.0, max_tokens=8_000)
     except Exception:
         return {}
-    return _clean(_parse(raw))
+    return _clean(_parse(raw), llm=llm)
 
 
 def _parse(raw: str) -> dict[str, Any]:
@@ -127,7 +127,7 @@ def _parse(raw: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _clean(value: dict[str, Any]) -> dict[str, object]:
+def _clean(value: dict[str, Any], *, llm: Any = None) -> dict[str, object]:
     result: dict[str, object] = {}
     culture = _short(value.get("culture"), 60)
     if culture:
@@ -153,9 +153,22 @@ def _clean(value: dict[str, Any]) -> dict[str, object]:
         result["message_shape"] = message_shape
     examples = result.get("reply_examples")
     if isinstance(examples, list):
+        persona = getattr(llm, "persona", None) if llm is not None else None
+        settings = getattr(llm, "settings", None) if llm is not None else None
+        persona_file = str(getattr(settings, "persona_file", "") or "")
+        legacy = not persona or bool(
+            str(getattr(persona, "name", "") or "").strip() == "大肥鱼"
+            or "dafeiyu" in persona_file.casefold()
+        )
         cleaned_examples: list[str] = []
         for item in examples:
-            text = sanitize_persona_reply(str(item), max_emoji=1)
+            text = sanitize_persona_reply(
+                str(item),
+                max_emoji=1,
+                self_reference="本鱼" if legacy else "我",
+                identity="鲸鱼娘" if legacy else (persona.name if persona else "这个角色"),
+                bubble_gags=legacy,
+            )
             if text and text not in cleaned_examples:
                 cleaned_examples.append(text)
         if cleaned_examples:
