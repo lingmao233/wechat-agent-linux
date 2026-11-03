@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 import threading
 import time
 import webbrowser
@@ -30,6 +31,7 @@ from .platform_memory import PlatformMemoryService
 from .storage import Storage
 from .console_memory import MemoryConsole, config_fields
 from .persona_upload import list_personas, upload_persona
+from .voice_studio import VoiceProfileError, VoiceProfiles
 from .web import STATIC_DIR, WebConsole
 from .web.settings_groups import mark_schema
 
@@ -176,6 +178,9 @@ PAGE_PATHS = frozenset({"/", "/members", "/groups", "/memory", "/settings", "/lo
 #: Every JSON route stays bounded; persona bundles may carry a whole folder.
 JSON_BODY_LIMIT = 1_000_000
 PERSONA_UPLOAD_BODY_LIMIT = 12_000_000
+# Reference audio is uploaded as base64 JSON; the decoded sample is capped at
+# 10 MB, so the transport ceiling needs room for the 4/3 expansion and fields.
+VOICE_UPLOAD_BODY_LIMIT = 16_000_000
 
 
 class DesktopController:
@@ -222,6 +227,7 @@ class DesktopController:
         self._storage = Storage(settings)
         self._storage.init_schema()
         self.memory_console = MemoryConsole(self._storage)
+        self.voice_studio = VoiceProfiles(settings)
         if settings.platform_browser_enabled:
             adapters = {
                 "douyin": BrowserPlatformAdapter(
@@ -584,6 +590,18 @@ class DesktopController:
     def replies(self, limit: int = 50) -> list[dict[str, object]]:
         return self._storage.recent_reply_records(limit)
 
+    def queue_details(self) -> dict[str, object]:
+        """Drill-down for the overview's "处理队列" counter.
+
+        The counter is based on the reply ledger; this payload explains which
+        row is currently claimed, how old it is, and whether durable reply
+        jobs are waiting behind it.
+        """
+
+        return self._storage.queue_details(
+            lease_seconds=self.settings.wechat_processing_lease_seconds
+        )
+
     def platform_status(self) -> dict[str, dict[str, object]]:
         return self._platforms.login_status()
 
@@ -812,6 +830,8 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.controller.audits())
         elif path == "/api/replies":
             self._send_json(self.server.controller.replies())
+        elif path == "/api/queue":
+            self._send_json(self.server.controller.queue_details())
         elif path == "/api/live":
             self._send_json(self.server.controller.live())
         elif path == "/api/events":
@@ -826,6 +846,8 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.controller.private_chats())
         elif path == "/api/personas":
             self._send_json(list_personas(self.server.controller.settings))
+        elif path == "/api/voice/profiles":
+            self._send_json(self.server.controller.voice_studio.snapshot())
         elif path == "/api/platforms":
             self._send_json(self.server.controller.platform_status())
         elif path == "/api/platform-actions":
@@ -861,6 +883,8 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         body_limit = (
             PERSONA_UPLOAD_BODY_LIMIT
             if path == "/api/personas/upload"
+            else VOICE_UPLOAD_BODY_LIMIT
+            if path == "/api/voice/profiles"
             else JSON_BODY_LIMIT
         )
         try:
@@ -880,6 +904,36 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                     body,
                     controller=self.server.controller,
                 )
+            elif path == "/api/voice/profiles":
+                payload = self.server.controller.voice_studio.create(body)
+            elif path == "/api/voice/profiles/import":
+                payload = self.server.controller.voice_studio.import_current(body)
+            elif path == "/api/voice/preview":
+                payload = self.server.controller.voice_studio.preview(
+                    str(body.get("profile_id") or ""),
+                    body.get("text"),
+                )
+            elif path == "/api/voice/preview-current":
+                payload = self.server.controller.voice_studio.preview_current(body.get("text"))
+            elif re.fullmatch(r"/api/voice/profiles/[a-f0-9]{12}/(activate|refresh|delete)", path):
+                profile_id, action = path.rsplit("/", 1)
+                profile_id = profile_id.rsplit("/", 1)[-1]
+                studio = self.server.controller.voice_studio
+                if action == "activate":
+                    profile, voice_id = studio.activate(profile_id)
+                    saved = self.server.controller.save_config(
+                        {"values": {"TTS_PROVIDER": str(profile.get("provider") or "aliyun"),
+                                    "TTS_VOICE": voice_id}}
+                    )
+                    payload = {
+                        "profile": profile,
+                        "restarted": bool(saved.get("restarted")),
+                        "config": saved.get("config"),
+                    }
+                elif action == "refresh":
+                    payload = studio.refresh(profile_id)
+                else:
+                    payload = studio.delete(profile_id)
             elif path == "/api/platforms/open":
                 payload = self.server.controller.open_platform(str(body.get("platform") or ""))
             elif path == "/api/platforms/close":
@@ -909,6 +963,9 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "not_found"}, 404)
                 return
+        except VoiceProfileError as exc:
+            self._send_json({"error": exc.code}, 400)
+            return
         except (ValueError, KeyError) as exc:
             self._send_json({"error": str(exc)}, 400)
             return

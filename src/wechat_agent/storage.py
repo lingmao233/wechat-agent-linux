@@ -2434,7 +2434,134 @@ class Storage:
             rows = session.execute(
                 select(ReplyRecordRow.status, func.count(ReplyRecordRow.id)).group_by(ReplyRecordRow.status)
             )
-            return {status: int(count) for status, count in rows}
+            summary = {status: int(count) for status, count in rows}
+            summary.setdefault("processing", 0)
+            return summary
+
+    def recover_stale_processing(self, lease_seconds: int | None = None, *, now: datetime | None = None) -> int:
+        """Close claims left behind by a previous agent process.
+
+        ``reply_records.processing`` is an idempotency claim, not a durable
+        worker queue.  If the process exits between the claim and the terminal
+        ``sent``/``skipped``/``failed`` write, the row would otherwise keep the
+        overview's queue counter at 1 forever because the original message is
+        not replayed.  Startup recovery runs before any new worker exists, so
+        rows older than the processing lease are safe to close here.
+        """
+
+        moment = now or utc_now()
+        lease = max(30, int(lease_seconds or getattr(self.settings, "wechat_processing_lease_seconds", 300)))
+        cutoff = moment - timedelta(seconds=lease)
+        with self.Session.begin() as session:
+            result = session.execute(
+                update(ReplyRecordRow)
+                .where(
+                    ReplyRecordRow.status == "processing",
+                    ReplyRecordRow.updated_at < cutoff,
+                )
+                .values(status="failed", reason="processing_interrupted", updated_at=moment)
+            )
+            return int(result.rowcount or 0)
+
+    def queue_details(self, *, limit: int = 50, lease_seconds: int | None = None) -> dict[str, object]:
+        """Return only the data needed by the overview queue drill-down.
+
+        The console deliberately exposes no account IDs, event hashes, or raw
+        media here.  It shows what the operator needs to understand a stuck
+        item: conversation, speaker, text preview, age, attempts, and reason.
+        """
+
+        from .reply_jobs import ReplyJobRow
+
+        moment = utc_now()
+        lease = max(30, int(lease_seconds or getattr(self.settings, "wechat_processing_lease_seconds", 300)))
+        cap = max(1, min(int(limit), 100))
+        with self.Session() as session:
+            processing = list(session.scalars(
+                select(ReplyRecordRow)
+                .where(ReplyRecordRow.status == "processing")
+                .order_by(ReplyRecordRow.updated_at.desc())
+                .limit(cap)
+            ))
+            processing_items: list[dict[str, object]] = []
+            for row in processing:
+                age = max(0, int((moment - _aware(row.updated_at)).total_seconds()))
+                processing_items.append({
+                    "id": int(row.id),
+                    "group_name": str(row.group_name or ""),
+                    "member_name": str(row.member_name or ""),
+                    "text": (str(row.text or "")[:500]),
+                    "reason": str(row.reason or ""),
+                    "source": str(row.source or ""),
+                    "attempt_count": int(row.attempt_count or 0),
+                    "created_at": _aware(row.created_at).isoformat(),
+                    "updated_at": _aware(row.updated_at).isoformat(),
+                    "age_seconds": age,
+                    "stale": age > lease,
+                })
+            job_rows = session.execute(
+                select(ReplyJobRow, MessageRow.group_name, MessageRow.member_name, MessageRow.text)
+                .join(MessageRow, ReplyJobRow.message_id == MessageRow.id)
+                .where(ReplyJobRow.state.in_(["pending", "running"]))
+                .order_by(ReplyJobRow.next_retry_at, ReplyJobRow.id)
+                .limit(cap)
+            ).all()
+            job_items: list[dict[str, object]] = []
+            for job, group_name, member_name, text in job_rows:
+                age = max(0, int((moment - _aware(job.updated_at)).total_seconds()))
+                job_items.append({
+                    "id": int(job.id),
+                    "state": str(job.state or ""),
+                    "group_name": str(group_name or ""),
+                    "member_name": str(member_name or ""),
+                    "text": (str(text or "")[:500]),
+                    "basis": str(job.basis or ""),
+                    "origin": str(job.origin or ""),
+                    "attempts": int(job.attempts or 0),
+                    "created_at": _aware(job.created_at).isoformat(),
+                    "updated_at": _aware(job.updated_at).isoformat(),
+                    "next_retry_at": _aware(job.next_retry_at).isoformat() if job.next_retry_at else None,
+                    "last_error": str(job.last_error or "")[:300],
+                    "age_seconds": age,
+                })
+            counts_rows = session.execute(
+                select(ReplyJobRow.state, func.count(ReplyJobRow.id))
+                .where(ReplyJobRow.state.in_(["pending", "running"]))
+                .group_by(ReplyJobRow.state)
+            )
+            job_counts = {state: int(count) for state, count in counts_rows}
+            interrupted = list(session.scalars(
+                select(ReplyRecordRow)
+                .where(
+                    ReplyRecordRow.status == "failed",
+                    ReplyRecordRow.reason.in_(["processing_interrupted", "processing_lease_expired"]),
+                )
+                .order_by(ReplyRecordRow.updated_at.desc())
+                .limit(min(10, cap))
+            ))
+            interrupted_items = [{
+                "id": int(row.id),
+                "group_name": str(row.group_name or ""),
+                "member_name": str(row.member_name or ""),
+                "text": (str(row.text or "")[:300]),
+                "reason": str(row.reason or ""),
+                "created_at": _aware(row.created_at).isoformat(),
+                "updated_at": _aware(row.updated_at).isoformat(),
+                "attempt_count": int(row.attempt_count or 0),
+            } for row in interrupted]
+        return {
+            "checked_at": moment.isoformat(),
+            "lease_seconds": lease,
+            "counts": {
+                "processing": len(processing_items),
+                "stale": sum(1 for item in processing_items if item["stale"]),
+                "pending_jobs": job_counts.get("pending", 0),
+                "running_jobs": job_counts.get("running", 0),
+            },
+            "processing": processing_items,
+            "jobs": job_items,
+            "recent_interrupted": interrupted_items,
+        }
 
     def proactive_send_times(self, account_id: str, group_id: str, *, since: datetime) -> list[datetime]:
         """Count verified unsolicited replies in this group, including after restart."""

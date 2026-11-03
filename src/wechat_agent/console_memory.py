@@ -48,8 +48,10 @@ def config_fields() -> list[dict]:
         },
         "语音回复": {
             "voice_reply_enabled": "启用语音回复", "voice_reply_probability": "随机语音概率",
+            "tts_provider": "语音合成供应商",
+            "tts_base_url": "通用 TTS API 地址", "tts_api_key": "通用 TTS API Key",
             "aliyun_audio_base_url": "阿里云语音原生 API 根地址", "aliyun_audio_api_key": "阿里云语音 API Key",
-            "tts_model": "阿里云语音合成模型", "tts_voice": "声音名称", "tts_instruction": "说话风格",
+            "tts_model": "语音合成模型", "tts_voice": "声音名称", "tts_instruction": "说话风格",
             "tts_rate": "说话速度", "tts_pitch": "声音音调", "tts_language": "合成语言", "tts_seed": "合成随机种子",
             "voice_reply_cache_dir": "可复用语音目录",
         },
@@ -86,13 +88,15 @@ def config_fields() -> list[dict]:
     for category, fields in groups.items():
         for key, label in fields.items():
             default = Settings.model_fields[key].default
-            secret = key in {"vision_api_key", "aliyun_audio_api_key"}
+            secret = key in {"vision_api_key", "aliyun_audio_api_key", "tts_api_key"}
             kind = "password" if secret else "checkbox" if isinstance(default, bool) else "number" if isinstance(default, (int, float)) or key == "wechat_linux_pid" else "text"
             item = {"key": key, "env": key.upper(), "label": label, "category": category, "type": kind, "secret": secret, "description": "保存后重新加载生效。"}
             if key == "wechat_platform":
                 item.update(type="select", options=["auto", "linux", "windows"])
             if key == "voice_provider":
                 item.update(type="select", options=["auto", "aliyun", "wechat", "local"])
+            if key == "tts_provider":
+                item.update(type="select", options=["aliyun", "openai_compatible", "elevenlabs"])
             if key == "tts_language":
                 item.update(type="select", options=["auto", "zh", "en", "ja"])
             if category == "语音识别":
@@ -114,16 +118,19 @@ def config_fields() -> list[dict]:
                 item["description"] = {
                     "voice_reply_enabled": "使用已配置音色发送微信原生语音条；关闭后也不响应明确的语音请求。声音完整生成后才发送。",
                     "voice_reply_probability": "普通回复先按此概率选择语音，未选中时再抽取配图。明确要求听声音或说话时优先语音；0 只关闭随机语音。",
-                    "aliyun_audio_base_url": "识别与合成共用。填写阿里云控制台提供、以 /api/v1 结尾的原生 API 根地址。",
-                    "aliyun_audio_api_key": "识别与合成共用，仅保存到运行机器 .env；留空保持原值，不会回传密钥。",
-                    "tts_model": "默认 qwen-audio-3.1-tts-plus。",
-                    "tts_voice": "默认 longanhuan_v3.1；需使用该模型支持的音色 ID。",
-                    "tts_instruction": "只控制声音风格和情绪，实际说话内容由聊天模型生成。",
-                    "tts_rate": "0.5 到 2.0，1 为原速；稍大于 1 会更轻快，保持音色。",
-                    "tts_pitch": "0.5 到 2.0，1 为原音调；复刻音色通常保持 1。",
-                    "tts_language": "auto 由模型判断；zh 中文，en 英语，ja 日语。",
-                    "tts_seed": "0 到 65535；模型、文字、音色和其余参数相同时固定合成变化。",
-                    "voice_reply_cache_dir": "按账号和群保存已完成音频；文字、声音、风格、语速、音调和语言相同才能复用。",
+                    "tts_provider": "aliyun：现有 Qwen-Audio，支持异步复刻；openai_compatible：任何实现 /v1/audio/speech 的服务，只支持预置音色；elevenlabs：支持即时复刻。",
+                    "tts_base_url": "openai_compatible 填服务根地址（通常以 /v1 结尾）；elevenlabs 留空使用官方地址；aliyun 填 /api/v1 根地址，留空沿用阿里云字段。",
+                    "tts_api_key": "通用 TTS Key，仅保存到运行机器 .env；留空保持原值，不会回传密钥。aliyun 留空时沿用阿里云语音 Key。",
+                    "aliyun_audio_base_url": "阿里云专用字段，识别与合成共用。TTS_PROVIDER=aliyun 且通用地址为空时生效。",
+                    "aliyun_audio_api_key": "阿里云专用字段，识别与合成共用。通用 TTS Key 为空时用于语音合成。",
+                    "tts_model": "阿里云默认 qwen-audio-3.1-tts-plus；OpenAI 兼容填服务商模型名（如 tts-1、gpt-4o-mini-tts）；ElevenLabs 填 eleven_multilingual_v2 等。",
+                    "tts_voice": "阿里云填音色 ID；OpenAI 兼容填 alloy、nova 等预置音色；ElevenLabs 填 voice_id。DIY 复刻成功后会自动写入。",
+                    "tts_instruction": "只控制声音风格和情绪，实际说话内容由聊天模型生成；OpenAI 兼容仅 gpt-4o 系列使用，ElevenLabs 不使用。",
+                    "tts_rate": "0.5 到 2.0，1 为原速；OpenAI 兼容映射为 speed，阿里云为 rate；ElevenLabs 暂不映射。",
+                    "tts_pitch": "0.5 到 2.0，1 为原音调；仅阿里云原生 TTS 使用。",
+                    "tts_language": "auto 由模型判断；zh 中文，en 英语，ja 日语。OpenAI 兼容与 ElevenLabs 由模型自行识别。",
+                    "tts_seed": "0 到 65535；仅阿里云原生 TTS 使用，其余供应商忽略。",
+                    "voice_reply_cache_dir": "按账号和群保存已完成音频；供应商、文字、声音、风格、语速等相同才能复用。",
                 }[key]
             if key == "proactive_max_per_group_hour":
                 item["description"] = "同时开启随机与计划参与时，共用已发送记录并采用较小的小时上限；0 暂停主动发言。"

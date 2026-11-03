@@ -299,6 +299,11 @@ class WeChatAgent:
         return {scope for scope in listener_scopes if scope[1] in group_ids}
 
     def _recover_reply_jobs(self) -> None:
+        stale_claims = self.storage.recover_stale_processing(
+            self.settings.wechat_processing_lease_seconds
+        )
+        if stale_claims:
+            log.warning("上次运行中断的处理记录已关闭 count=%s", stale_claims)
         recovered = reply_jobs.recover_all(self.storage)
         if recovered["uncertain"]:
             log.warning("发送结果不确定的回复任务已转人工确认 count=%s", recovered["uncertain"])

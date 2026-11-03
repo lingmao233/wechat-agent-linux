@@ -194,6 +194,12 @@ class Settings(BaseSettings):
     # Only remote image/audio calls use this; LAN chat and memory keep their routes.
     media_http_proxy_url: str = ""
     asr_model: str = "qwen-audio-3.1-asr-flash"
+    # Speech synthesis provider.  Aliyun keeps its existing native API fields
+    # for backward compatibility; the generic base URL/key override them when
+    # set.  OpenAI-compatible gateways and ElevenLabs use the generic fields.
+    tts_provider: Literal["aliyun", "openai_compatible", "elevenlabs"] = "aliyun"
+    tts_base_url: str = ""
+    tts_api_key: str = ""
     tts_model: str = "qwen-audio-3.1-tts-plus"
     tts_voice: str = "longanhuan_v3.1"
     tts_instruction: str = "用轻快、自然的年轻女声说话，像和朋友聊天，情绪跟随句子的意思。"
@@ -206,6 +212,10 @@ class Settings(BaseSettings):
     singing_reply_enabled: bool = True
     voice_reply_probability: float = Field(default=0.15, ge=0, le=1)
     voice_reply_cache_dir: Path = Path("state/voice-replies")
+    # Local metadata and normalized reference clips for user-created (cloned)
+    # voices.  The provider voice ID lives in TTS_VOICE; this directory keeps
+    # only what the settings UI needs to list, preview and delete profiles.
+    voice_profiles_dir: Path = Path("state/voice-profiles")
     wechat_voice_conversion_timeout_seconds: float = Field(default=25, ge=1, le=60)
     voice_model: str = "small"
     voice_language: str = "zh"
@@ -482,6 +492,12 @@ class Settings(BaseSettings):
                 audio_endpoint(self.aliyun_audio_base_url, "")
             except SpeechError as exc:
                 raise ValueError("ALIYUN_AUDIO_BASE_URL 必须是以 /api/v1 结尾的原生 API 根地址") from exc
+        if self.tts_base_url.strip():
+            from urllib.parse import urlsplit
+            endpoint = urlsplit(self.tts_base_url.strip())
+            if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname
+                    or endpoint.username or endpoint.password or endpoint.fragment):
+                raise ValueError("TTS_BASE_URL 必须是无凭据的 HTTP(S) 地址")
         if self.media_http_proxy_url.strip():
             from urllib.parse import urlsplit
             proxy = urlsplit(self.media_http_proxy_url.strip())

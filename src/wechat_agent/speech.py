@@ -21,6 +21,8 @@ import wave
 
 import httpx
 
+from .tts.base import VoiceProviderError
+
 MAX_SPEECH_BYTES = 8_000_000
 MAX_REPLY_SECONDS = 55
 MELODY_ALGORITHM_VERSION = 2
@@ -428,9 +430,20 @@ class SpeechClip:
 
 
 class SpeechReplies:
-    def __init__(self, settings, *, api=None):
+    def __init__(self, settings, *, api=None, provider=None):
         self.settings = settings
-        self.api = api or AliyunAudio(settings)
+        if provider is not None:
+            self.provider = provider
+        elif api is not None:
+            # Backward-compatible seam used by tests and older integrations.
+            from .tts.aliyun import AliyunTTSProvider
+            self.provider = AliyunTTSProvider(settings, api=api)
+        else:
+            from .tts.registry import build_provider
+            self.provider = build_provider(settings)
+        # Kept for callers that still inspect the Aliyun client; provider-only
+        # backends return None here.
+        self.api = getattr(self.provider, "api", None)
         self._lock = threading.Lock()
 
     def should_offer(
@@ -441,11 +454,13 @@ class SpeechReplies:
         request_kind: str = "",
         declined: bool = False,
     ) -> bool:
-        if (not self.settings.voice_reply_enabled or not self.api.configured
+        capabilities = getattr(self.provider, "capabilities", None)
+        if (not self.settings.voice_reply_enabled or not bool(getattr(self.provider, "configured", False))
                 or declined or voice_reply_declined(event.text)):
             return False
         request_kind = str(request_kind or "").strip().casefold()
-        if request_kind == "singing" and not getattr(self.settings, "singing_reply_enabled", True):
+        if request_kind == "singing" and (not getattr(self.settings, "singing_reply_enabled", True)
+                                          or not bool(getattr(capabilities, "singing", False))):
             # ``voice_reply_enabled`` controls speech in general; singing has
             # its own switch so a point-song request cannot silently consume a
             # normal voice opportunity when singing is disabled.
@@ -467,19 +482,18 @@ class SpeechReplies:
         mode = "singing" if mode == "singing" else "speech"
         if mode == "singing" and not getattr(self.settings, "singing_reply_enabled", True):
             raise SpeechError("singing_disabled")
+        capabilities = getattr(self.provider, "capabilities", None)
+        if mode == "singing" and not bool(getattr(capabilities, "singing", False)):
+            raise SpeechError("singing_provider_unsupported")
         settings = self.settings
-        synthesis_input = {"text": text, "voice": settings.tts_voice, "format": "wav", "sample_rate": 24000,
-                           "rate": settings.tts_rate, "pitch": settings.tts_pitch, "seed": settings.tts_seed}
-        instruction = settings.tts_singing_instruction if mode == "singing" else settings.tts_instruction
-        if instruction.strip():
-            synthesis_input["instruction"] = instruction
-        if settings.tts_language != "auto":
-            synthesis_input["language_hints"] = [settings.tts_language]
-        # Keep ordinary speech cache keys stable.  Singing gets its own
-        # algorithm version so clips made by the old contour are never reused.
-        cache_version = (3 + MELODY_ALGORITHM_VERSION) if mode == "singing" else 3
-        fingerprint = json.dumps([cache_version, mode, settings.aliyun_audio_base_url, settings.tts_model, synthesis_input],
-                                 ensure_ascii=False, sort_keys=True)
+        # The provider owns its own credential/endpoint/model material.  The
+        # generic cache version changes when the fingerprint layout changes so
+        # clips from the Aliyun-only implementation are never reused blindly.
+        material = self.provider.cache_material()
+        fingerprint = json.dumps(
+            [4, mode, str(getattr(self.provider, "provider_id", "")), material, text],
+            ensure_ascii=False, sort_keys=True, default=str,
+        )
         scope = hashlib.sha256((account_id + "\0" + group_id).encode()).hexdigest()[:16]
         target = settings.voice_reply_cache_dir / scope / (hashlib.sha256(fingerprint.encode()).hexdigest() + ".wav")
         with self._lock:
@@ -487,14 +501,12 @@ class SpeechReplies:
                 return SpeechClip(str(target), wave_duration(target), settings.tts_model, settings.tts_voice, True, mode)
             except SpeechError:
                 pass
-            result = self.api.request("/services/audio/tts/SpeechSynthesizer", {
-                "model": settings.tts_model, "input": synthesis_input,
-            })
-            output = result.get("output")
-            audio = output.get("audio") if isinstance(output, dict) else None
-            if not isinstance(audio, dict) or not isinstance(audio.get("url"), str) or not audio["url"]:
+            try:
+                data = self.provider.synthesize(text, mode=mode)
+            except VoiceProviderError as exc:
+                raise SpeechError(exc.code) from exc
+            if not data:
                 raise SpeechError("tts_audio_missing")
-            data = complete_tts_wave(self.api.download(audio["url"]))
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if os.name == "posix":
                 os.chmod(target.parent, 0o700)
