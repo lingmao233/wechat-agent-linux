@@ -47,7 +47,7 @@ VISIBLE_WIDGETS: dict[str, dict[str, object]] = {
     "LLM_MODEL": {"placeholder": "deepseek-chat"},
     "EMBED_BASE": {"placeholder": "https://ark.cn-beijing.volces.com/api/v3"},
     "EMBED_MODEL": {"placeholder": "doubao-embedding-vision-251215"},
-    "PERSONA_NAME": {"placeholder": "大肥鱼"},
+    "PERSONA_NAME": {"placeholder": "例如：大肥鱼 / 自定义角色名"},
     "PERSONA_FILE": {"placeholder": "personas/dafeiyu/SKILL.md"},
     "TTS_VOICE": {"placeholder": "longanhuan_v3.1"},
     "IMAGE_MODEL": {"placeholder": "gpt-image-1"},

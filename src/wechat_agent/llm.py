@@ -101,9 +101,12 @@ class LLMClient:
         persona = self.persona
         # With no configured persona the historical fallback is retained.
         # A custom persona gets neutral fallbacks instead of whale-girl words.
+        # Detect the bundled dafeiyu by its name/file, not by the optional
+        # source-URL field: switching only PERSONA_FILE/NAME can leave that URL
+        # pointing at the old repository.
         legacy = not persona or bool(
             persona.name.strip() == "大肥鱼"
-            or "dafeiyu" in persona.source.casefold()
+            or "dafeiyu" in str(self.settings.persona_file).casefold()
         )
         return sanitize_persona_reply(
             text,
