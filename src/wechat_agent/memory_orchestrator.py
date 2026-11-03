@@ -264,13 +264,13 @@ class MemoryOrchestrator:
         bundle.relations = relations or self.storage.top_relations(event.account_id, event.group_id)
         candidates: list[EvidenceItem] = []
         if plan.needs_memory:
-            candidates.extend(self._local(event, plan, snapshot, expanded=False))
+            candidates.extend(self._local(event, plan, snapshot, expanded=False, deadline=deadline))
         if event.reply_to:
             candidates.insert(0, EvidenceItem(evidence_id="quote-" + stable_id(event.account_id, event.group_id, event.reply_to.message_id or event.reply_to.text), object_id=event.reply_to.message_id or "explicit_quote", account_id=event.account_id, group_id=event.group_id, content=event.reply_to.text, actor_member_id=event.reply_to.sender_id, actor_name=event.reply_to.sender_name, source_role="human", occurred_at=event.reply_to.created_at.isoformat() if event.reply_to.created_at else "", confidence=1.0, source_message_ids=[event.reply_to.message_id] if event.reply_to.message_id else [], quoted=True, source_availability="explicit_quote"))
         remote_failed = False
         calls = 0
         if plan.needs_memory and self.settings.memory_retrieval_max_rounds > 1 and not any(item.event_type in plan.event_types if plan.event_types else item.semantic_score > 0.1 for item in candidates) and time.monotonic() < deadline:
-            candidates.extend(self._local(event, plan, snapshot, expanded=True))
+            candidates.extend(self._local(event, plan, snapshot, expanded=True, deadline=deadline))
         bundle.evidence = self._validate_and_rank(candidates, event, bundle)
         bundle.coverage = {"analysis_caught_up": analysis_ready, "candidate_count": len(candidates), "candidate_limit": self.settings.memory_retrieval_max_candidates}
         bundle.retrieval_status = "ANALYSIS_PENDING" if not analysis_ready else "SOURCE_EXPIRED" if bundle.evidence and all(item.source_availability == "expired" for item in bundle.evidence) else "NO_EVIDENCE" if plan.needs_memory and not bundle.evidence else "PLAN_INVALID" if not plan.valid else "OK"
@@ -279,7 +279,7 @@ class MemoryOrchestrator:
         self.runtime.save_trace(bundle)
         return bundle
 
-    def _message_evidence(self, event, plan, snapshot) -> list[EvidenceItem]:
+    def _message_evidence(self, event, plan, snapshot, *, deadline: float | None = None) -> list[EvidenceItem]:
         """Fuse lexical (FTS5/BM25) and semantic (vector) message recall.
 
         Reciprocal rank fusion is used instead of a weighted sum: the two
@@ -300,19 +300,36 @@ class MemoryOrchestrator:
         semantic: list[dict] = []
         embedder = self.storage.embedder
         if embedder.configured:
-            try:
-                query_vector, model = embedder.embed_one(" ".join(plan.queries or [event.text])[:1000], is_query=True)
-                semantic = self.storage.search_messages_semantic(
-                    event.account_id,
-                    event.group_id,
-                    query_vector,
-                    limit=limit,
-                    before_id=snapshot.message_watermark,
-                    until=snapshot.evaluated_at,
-                    model=model,
-                )
-            except EmbeddingError as exc:
-                log.warning("query embedding unavailable error=%s", type(exc).__name__)
+            query_text = " ".join(plan.queries or [event.text])[:1000].strip()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if not query_text:
+                log.debug("query embedding skipped reason=empty_query")
+            elif remaining is not None and remaining <= 0.5:
+                log.debug("query embedding skipped reason=deadline_exhausted")
+            else:
+                try:
+                    if remaining is None:
+                        query_vector, model = embedder.embed_one(query_text, is_query=True)
+                    else:
+                        query_vector, model = embedder.embed_one(
+                            query_text,
+                            is_query=True,
+                            timeout_seconds=min(remaining, 10.0),
+                        )
+                    semantic = self.storage.search_messages_semantic(
+                        event.account_id,
+                        event.group_id,
+                        query_vector,
+                        limit=limit,
+                        before_id=snapshot.message_watermark,
+                        until=snapshot.evaluated_at,
+                        model=model,
+                    )
+                except EmbeddingError as exc:
+                    # Keep this safe (no headers/body), but include the typed
+                    # reason so an exhausted budget and a transport error are
+                    # distinguishable in production logs.
+                    log.warning("query embedding unavailable error=%s", str(exc)[:200])
         fused: dict[int, float] = {}
         for rows in (lexical, semantic):
             for row in rows:
@@ -345,7 +362,7 @@ class MemoryOrchestrator:
                     items[-1].semantic_score = min(1.0, items[-1].semantic_score + 0.05)
         return items
 
-    def _local(self, event, plan, snapshot, *, expanded: bool) -> list[EvidenceItem]:
+    def _local(self, event, plan, snapshot, *, expanded: bool, deadline: float | None = None) -> list[EvidenceItem]:
         result = []
         # No implicit recency gate: the planner decides whether a question is
         # about the far past, and ranking (BM25 + vectors, or event recency)
@@ -360,7 +377,7 @@ class MemoryOrchestrator:
                     result.append(item)
         with self.storage.Session() as session:
             if "raw_message" in plan.memory_types:
-                for item in self._message_evidence(event, plan, snapshot):
+                for item in self._message_evidence(event, plan, snapshot, deadline=deadline):
                     result.append(item)
             if any(kind in plan.memory_types for kind in ("fact", "profile", "task")):
                 owners = [event.member_id, *plan.subject_member_ids]

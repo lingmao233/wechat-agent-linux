@@ -10,6 +10,7 @@ can safely fall back to lexical retrieval.
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Any
 
 import httpx
@@ -26,6 +27,13 @@ class EmbeddingResult:
     vectors: list[list[float]]
     model: str
     dimension: int
+
+
+# A broken proxy/TUN path can hang a connection far longer than a healthy
+# embedding request.  Cap only the connection phase so read time still follows
+# the caller's retrieval budget, and retry a refused/reset connection once.
+_CONNECT_TIMEOUT_SECONDS = 5.0
+_CONNECT_RETRY_DELAY_SECONDS = 0.1
 
 
 class EmbeddingClient:
@@ -66,12 +74,25 @@ class EmbeddingClient:
             and self.api_key
         )
 
-    def embed(self, texts: list[str], *, is_query: bool = False) -> EmbeddingResult:
+    def embed(
+        self,
+        texts: list[str],
+        *,
+        is_query: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> EmbeddingResult:
         values = [str(text or "").strip() for text in texts]
         if not values or any(not value for value in values):
             raise EmbeddingError("embedding_input_empty")
         if not self.configured:
             raise EmbeddingError("embedding_not_configured")
+        budget = float(self.settings.embed_timeout_seconds)
+        if timeout_seconds is not None:
+            budget = min(budget, max(0.01, float(timeout_seconds)))
+        # Keep the connection attempt short even when the total request allows
+        # a longer read.  An unreachable proxy should fall back to lexical
+        # recall in seconds, not wait for the full embedding timeout.
+        timeout = httpx.Timeout(budget, connect=min(_CONNECT_TIMEOUT_SECONDS, budget))
         headers = {
             "Authorization": "Bearer " + self.api_key,
             "Accept": "application/json",
@@ -79,7 +100,7 @@ class EmbeddingClient:
         }
         try:
             with httpx.Client(
-                timeout=self.settings.embed_timeout_seconds,
+                timeout=timeout,
                 trust_env=False,
             ) as client:
                 if self.multimodal_endpoint:
@@ -88,7 +109,8 @@ class EmbeddingClient:
                     # list of memories remains a list of independent vectors.
                     rows: list[dict[str, Any]] = []
                     for value in values:
-                        response = client.post(
+                        response = self._post(
+                            client,
                             self.endpoint,
                             headers=headers,
                             json={
@@ -96,7 +118,6 @@ class EmbeddingClient:
                                 "input": [{"type": "text", "text": value}],
                             },
                         )
-                        response.raise_for_status()
                         data = response.json()
                         row = data.get("data") if isinstance(data, dict) else None
                         if not isinstance(row, dict):
@@ -114,12 +135,12 @@ class EmbeddingClient:
                     # it for providers that do not document it.
                     if is_query:
                         payload["input_type"] = "query"
-                    response = client.post(
+                    response = self._post(
+                        client,
                         self.endpoint,
                         headers=headers,
                         json=payload,
                     )
-                    response.raise_for_status()
                     data = response.json()
                     raw_rows = data.get("data") if isinstance(data, dict) else None
                     if not isinstance(raw_rows, list) or len(raw_rows) != len(values):
@@ -158,7 +179,34 @@ class EmbeddingClient:
             dimension=len(vectors[0]),
         )
 
-    def embed_one(self, text: str, *, is_query: bool = False) -> tuple[list[float], str]:
-        result = self.embed([text], is_query=is_query)
+    @staticmethod
+    def _post(client: httpx.Client, url: str, *, headers: dict[str, str], json: dict[str, Any]):
+        """POST once, retrying a refused/reset connection once.
+
+        HTTP errors are returned as-is so the caller can distinguish a provider
+        rejection from a transport failure.  Read timeouts are intentionally not
+        retried: retrying them doubles the latency the reply path is trying to
+        avoid.
+        """
+
+        for attempt in range(2):
+            try:
+                response = client.post(url, headers=headers, json=json)
+                response.raise_for_status()
+                return response
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if attempt:
+                    raise
+                time.sleep(_CONNECT_RETRY_DELAY_SECONDS)
+        raise AssertionError("unreachable")
+
+    def embed_one(
+        self,
+        text: str,
+        *,
+        is_query: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> tuple[list[float], str]:
+        result = self.embed([text], is_query=is_query, timeout_seconds=timeout_seconds)
         return result.vectors[0], result.model
 
