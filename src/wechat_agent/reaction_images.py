@@ -16,22 +16,11 @@ from PIL import Image
 
 from .config import Settings
 from .models import MessageEvent
+from .persona import load_persona
 
 
 log = logging.getLogger(__name__)
 
-# These describe the visual reference, not any text printed in the attachments.
-# The model supplies the actual emotion, pose, scene and optional short caption.
-CHARACTER_STYLE = (
-    "主体必须且只能是同一位蓝色鲸鱼娘大肥鱼：可爱的二至三头身Q版女孩，"
-    "蓬松的深蓝到亮蓝渐变长发、大大的蓝眼睛、鲸鱼鳍状耳朵和蓝色鲸鱼尾巴，"
-    "深蓝白色荷叶边女仆裙、白围裙和蓝色蝴蝶结，海洋与鲸鱼小配饰。"
-    "柔软圆润的可爱日系表情包插画，干净线条、柔和上色、清晰夸张的情绪，"
-    "简洁浅色背景或透明背景。是一位鲸鱼娘，不是单独的鲸鱼动物。"
-    "只画一张独立的单幅表情图片，只表达一种意思；"
-    "禁止九宫格、拼图、多格漫画、动作图集、重复角色和多种表情合集。"
-)
-_STYLE_ID = hashlib.sha256(CHARACTER_STYLE.encode()).hexdigest()[:16]
 _ID = re.compile(r"[0-9a-f]{64}\Z")
 _ADDRESSEE = re.compile(r"用户|客户|顾客|群主|管理员|亲爱的|老铁|家人们|wxid_|@|\busers?\b|\bcustomers?\b", re.I)
 
@@ -98,18 +87,31 @@ class ReactionImages:
     _locks_guard = threading.Lock()
     _locks: dict[str, threading.Lock] = {}
 
-    def __init__(self, settings: Settings, image_client):
+    def __init__(self, settings: Settings, image_client, image_style: str | None = None):
         self.settings, self.image_client = settings, image_client
+        if image_style is None:
+            persona = load_persona(settings)
+            image_style = persona.image_style if persona else ""
+        # The style is deliberately owned by the active persona.  An empty
+        # style disables optional reaction pictures instead of falling back to
+        # whichever character happened to be bundled previously.
+        self.image_style = _clean(image_style)
+        self._style_id = (
+            hashlib.sha256(self.image_style.encode()).hexdigest()[:16]
+            if self.image_style else ""
+        )
 
     @property
     def root(self) -> Path:
-        return Path(self.settings.reaction_image_cache_dir).resolve() / _STYLE_ID
+        return Path(self.settings.reaction_image_cache_dir).resolve() / (self._style_id or "_disabled")
 
     def _lock(self) -> threading.Lock:
         with self._locks_guard:
             return self._locks.setdefault(str(self.root), threading.Lock())
 
     def should_offer(self, event: MessageEvent) -> bool:
+        if not self.image_style:
+            return False
         if not self.settings.wechat_allow_send or self.settings.stop_file.exists():
             return False
         if not self.settings.reaction_images_enabled or not self.settings.image_model_enabled:
@@ -145,7 +147,7 @@ class ReactionImages:
             return None
         try:
             item = json.loads((self.root / f"{image_id}.json").read_text(encoding="utf-8"))
-            if not isinstance(item, dict) or item.get("style_id") != _STYLE_ID or item.get("image_id") != image_id:
+            if not isinstance(item, dict) or item.get("style_id") != self._style_id or item.get("image_id") != image_id:
                 return None
             plan = ReactionImagePlan.from_dict(item)
             # Legacy entries without an explicit scene are intentionally
@@ -165,7 +167,7 @@ class ReactionImages:
             return None
 
     def catalog(self, limit: int = 16) -> list[dict]:
-        if not self.root.is_dir():
+        if not self.image_style or not self.root.is_dir():
             return []
         files = sorted(self.root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         result = []
@@ -182,19 +184,20 @@ class ReactionImages:
                 break
         return result
 
-    @staticmethod
-    def prompt(plan: ReactionImagePlan) -> str:
+    def prompt(self, plan: ReactionImagePlan) -> str:
         caption = (
             "画面中的唯一文字为这句简短文案：" + json.dumps(plan.caption, ensure_ascii=False) + "。逐字准确绘制，不添加其他文字。"
             if plan.caption else "画面不出现任何文字、字母、字幕或对话文字。"
         )
-        return (CHARACTER_STYLE + "\n本张情绪：" + plan.emotion + "。动作与含义：" + plan.action
+        return (self.image_style + "\n本张情绪：" + plan.emotion + "。动作与含义：" + plan.action
                 + "。\n由对话模型设计的画面：" + plan.prompt + "\n" + caption
                 + "不出现用户等身份称呼，不出现昵称、姓名、账号、@、落款、水印和收件对象。"
                 + "只用通用情绪、动作和道具表达，适合下次复用；保持单幅、单一意思。")
 
     def prepare(self, plan: ReactionImagePlan, *, names: list[str] | None = None, scene_hint: str = "") -> ReactionImage | None:
         names = names or []
+        if not self.image_style:
+            return None
         plan = ReactionImagePlan.from_dict(asdict(plan))
         if not plan:
             return None
@@ -218,7 +221,7 @@ class ReactionImages:
                 return None
             if not plan.scene:
                 plan = ReactionImagePlan(plan.emotion, plan.action, plan.prompt, plan.caption, plan.reuse_id, scene, plan.topic_tags)
-            key = json.dumps([_STYLE_ID, plan.emotion.casefold(), plan.action.casefold(), plan.caption,
+            key = json.dumps([self._style_id, plan.emotion.casefold(), plan.action.casefold(), plan.caption,
                               plan.scene.casefold(), tuple(tag.casefold() for tag in plan.topic_tags)], ensure_ascii=False)
             image_id = hashlib.sha256(key.encode()).hexdigest()
             item = self._entry(image_id)
@@ -241,7 +244,7 @@ class ReactionImages:
                     picture.convert("RGBA").save(temp_image, format="PNG")
                 if temp_image.stat().st_size > self.settings.image_upload_max_bytes:
                     raise ValueError("reaction_image_too_large")
-                item = {"image_id": image_id, "style_id": _STYLE_ID, "emotion": plan.emotion,
+                item = {"image_id": image_id, "style_id": self._style_id, "emotion": plan.emotion,
                         "action": plan.action, "prompt": plan.prompt, "caption": plan.caption,
                         "scene": plan.scene, "topic_tags": list(plan.topic_tags),
                         "sha256": hashlib.sha256(temp_image.read_bytes()).hexdigest()}

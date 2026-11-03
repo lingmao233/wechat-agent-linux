@@ -97,7 +97,12 @@ class WeChatAgent:
         self.platform_automation = platform_automation
         self.platform_memory = platform_memory or getattr(platform_automation, "memory", None)
         self.image_client = image_client or ImageClient(settings)
-        self.reaction_images = ReactionImages(settings, self.image_client)
+        # Keep the optional picture style in sync with the speaking persona.
+        # Injected test doubles may not expose a persona; in that case
+        # ReactionImages loads the configured persona itself.
+        persona = getattr(self.llm, "persona", None)
+        persona_image_style = getattr(persona, "image_style", None) if persona is not None else None
+        self.reaction_images = ReactionImages(settings, self.image_client, image_style=persona_image_style)
         self.voice = voice_service or VoiceService(settings, self.llm, wechat_transcriber=getattr(self.ui, "transcribe_voice", None))
         self.speech = speech_service or SpeechReplies(settings)
         self.stats = AgentStats()

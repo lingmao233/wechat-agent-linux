@@ -37,9 +37,24 @@ _SYSTEM = """你在为一个微信群里的 AI 助手整理群聊画像。
 }
 判断依据只能是转写中反复出现的内容；证据不足就留空数组或空对象，不要编造。
 只记录无恶意的整活/反串；不要记录骗取钱财、账号、隐私或冒充真实身份的做法。
-所有 reply_examples 必须是“鲸鱼娘大肥鱼”的口吻：知道自己是鲸鱼娘、爱吃白饭、傲娇爱摸鱼但会把事做好；
-不吐泡泡/冒泡/咕噜/啵啵，表情最多一个且不是每条都有，不自称 AI，像群里的活人。
+所有 reply_examples 必须符合当前助手人设的口吻：__PERSONA_GUIDANCE__
+表情最多一个且不是每条都有，不自称 AI，像群里的活人。
 不要输出真实姓名、手机号、地址等敏感信息。"""
+
+
+def _persona_guidance(llm: Any) -> str:
+    """Keep the profile builder aligned with whichever persona is active."""
+
+    persona = getattr(llm, "persona", None)
+    speech_style = str(getattr(persona, "speech_style", "") or "").strip()
+    if persona is not None and speech_style:
+        name = str(getattr(persona, "name", "") or "当前角色").strip() or "当前角色"
+        return f"这是“{name}”的说话风格，不能换成其他角色：{speech_style[:600]}"
+    return "使用群友一样的自然中文，不要继承任何特定角色的口癖或形象。"
+
+
+def _system_prompt(llm: Any) -> str:
+    return _SYSTEM.replace("__PERSONA_GUIDANCE__", _persona_guidance(llm))
 
 _RETRY = """上一次输出被截断或不是合法 JSON。请重新输出一个更短的 JSON 对象：
 所有字符串不超过 20 个字，reply_examples/jokes/rules/taboos/bit_routines/tease_patterns/comfort_patterns/meme_triggers 最多 3 条，
@@ -81,7 +96,7 @@ def synthesize_group_profile(
     if not transcript:
         return {}
     try:
-        raw = llm.complete(_SYSTEM, transcript, temperature=0.2, max_tokens=8_000)
+        raw = llm.complete(_system_prompt(llm), transcript, temperature=0.2, max_tokens=8_000)
     except Exception:
         return {}
     cleaned = _clean(_parse(raw))

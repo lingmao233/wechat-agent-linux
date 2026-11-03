@@ -228,8 +228,10 @@ class Settings(BaseSettings):
     # Generated pictures (image-model output) default next to the chat media so
     # deployments can keep every runtime file on one data disk.
     image_output_dir: Path = Path("state/generated")
-    # Optional, reusable pictures of the persona accompanying an ordinary reply.
-    # This uses the existing image model; it never turns every reply into a picture.
+    # Optional, reusable pictures of the active persona accompanying an ordinary
+    # reply.  The character comes from the persona's image-style.md; without
+    # that file this feature is disabled.  It never turns every reply into a
+    # picture and uses the existing image model.
     reaction_images_enabled: bool = True
     reaction_image_probability: float = Field(default=0.3, ge=0, le=1)
     reaction_image_cache_dir: Path = Path("state/reaction-images")
@@ -359,13 +361,16 @@ class Settings(BaseSettings):
     # Operator-provided speaking style.  The bundled default is the
     # dafeiyu-persona adaptation under personas/dafeiyu/; deployments can point
     # this at any Markdown persona file and its adjacent references/ folder.
+    # Optional references/speech-style.md and references/image-style.md let a
+    # persona own its voice and optional picture character independently.
     persona_enabled: bool = True
     persona_name: str = "大肥鱼"
     persona_file: Path = Path("personas/dafeiyu/SKILL.md")
     persona_source_url: str = "https://github.com/ERUIHNIYHBKBNF/dafeiyu-persona"
     persona_max_chars: int = Field(default=12_000, ge=500, le=50_000)
-    # Deterministic post-checks keep the persona human-like: no self-AI
-    # phrasing, no bubble gimmicks and only a small number of emoji.
+    # Deterministic post-checks keep replies human-like.  Legacy dafeiyu output
+    # substitutions only apply to the bundled persona; custom personas use
+    # neutral fallbacks.
     persona_style_filter: bool = True
     persona_max_emoji: int = Field(default=1, ge=0, le=5)
 

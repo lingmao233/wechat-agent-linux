@@ -72,25 +72,25 @@ _EMOJI_RE = re.compile(
 _META_DISCLOSURE_REPLACEMENTS = (
     (
         re.compile(r"我(?:被)?禁止(?:了)?[^。！？!?\n]{0,16}(?:过激侮辱|脏话|骂人)"),
-        "本鱼不骂人",
+        "{self}不骂人",
     ),
     (
         re.compile(
             r"我(?:不会|不能|不可以|不被允许|被禁止|被限制)"
             r"[^。！？!?\n]{0,18}(?:吐泡泡|冒泡|说脏话|骂人|过激侮辱|侮辱别人)"
         ),
-        "本鱼不玩这个",
+        "{self}不玩这个",
     ),
     (
         re.compile(r"我(?:被)?(?:系统|人设|规则|审核|过滤)(?:要求|限制|禁止|不允许)"),
-        "本鱼自己",
+        "{self}自己",
     ),
     (
         re.compile(
             r"我的(?:系统|人设|审核|过滤)?(?:提示词|规则|设定)"
             r"|系统提示|人设文件|审核规则|过滤词表"
         ),
-        "本鱼的习惯",
+        "{self}的习惯",
     ),
     (
         re.compile(
@@ -100,7 +100,7 @@ _META_DISCLOSURE_REPLACEMENTS = (
         ),
         "规矩",
     ),
-    (re.compile(r"开发者(?:告诉|要求|规定)我"), "本鱼自己"),
+    (re.compile(r"开发者(?:告诉|要求|规定)我"), "{self}自己"),
 )
 
 _BUBBLE_PATTERNS = (
@@ -135,7 +135,7 @@ _SELF_AI_PATTERNS = (
             r"(?:助手|机器人|语言模型|大模型)?",
             re.IGNORECASE,
         ),
-        "本鱼是鲸鱼娘",
+        "{self}是{identity}",
     ),
     (
         re.compile(
@@ -144,7 +144,7 @@ _SELF_AI_PATTERNS = (
             r"(?:助手|机器人|语言模型|大模型)?",
             re.IGNORECASE,
         ),
-        "作为鲸鱼娘",
+        "作为{identity}",
     ),
 )
 
@@ -330,24 +330,34 @@ def sanitize_persona_reply(
     *,
     max_emoji: int = 1,
     tone: ToneWordRotator | None = None,
+    self_reference: str = "本鱼",
+    identity: str = "鲸鱼娘",
+    bubble_gags: bool = True,
 ) -> str:
     """Apply the persona's small, deterministic output constraints.
 
     ``tone`` is the per-agent voice bookkeeper.  When supplied, severe
     insults rotate through the insulted scene and mutual-teasing words used in
     the last five replies are swapped out instead of repeating.
+
+    ``self_reference``, ``identity`` and ``bubble_gags`` are the legacy
+    dafeiyu voice defaults.  A custom persona can pass its own name and set
+    ``bubble_gags=False`` so the output filter does not insert whale-girl
+    phrasing into an unrelated character.
     """
 
     value = str(text or "").strip()
     if not value:
         return value
+    labels = {"self": self_reference or "我", "identity": identity or "这个角色"}
     for pattern, replacement in _META_DISCLOSURE_REPLACEMENTS:
-        value = pattern.sub(replacement, value)
-    for pattern in _BUBBLE_PATTERNS:
-        value = pattern.sub("", value)
-    # "冒个泡" is the same bubble gimmick in a different wording; keep the
-    # sentence natural instead of deleting it outright.
-    value = re.sub(r"冒个泡|冒泡", "说一声", value)
+        value = pattern.sub(replacement.format(**labels), value)
+    if bubble_gags:
+        for pattern in _BUBBLE_PATTERNS:
+            value = pattern.sub("", value)
+        # "冒个泡" is the same bubble gimmick in a different wording; keep the
+        # sentence natural instead of deleting it outright.
+        value = re.sub(r"冒个泡|冒泡", "说一声", value)
     used_insult: set[str] = {
         word for _, _, word in _tone_matches(value)
     }
@@ -363,7 +373,7 @@ def sanitize_persona_reply(
         else:
             value = pattern.sub(replacement, value)
     for pattern, replacement in _SELF_AI_PATTERNS:
-        value = pattern.sub(replacement, value)
+        value = pattern.sub(replacement.format(**labels), value)
 
     limit = max(0, int(max_emoji))
     seen = 0
@@ -376,7 +386,7 @@ def sanitize_persona_reply(
     value = _EMOJI_RE.sub(keep_limited, value)
     value = re.sub(r"[ \t]{2,}", " ", value)
     value = re.sub(r"\n{3,}", "\n\n", value).strip()
-    value = value or "本鱼在。"
+    value = value or f"{labels['self']}在。"
     if tone is not None:
         value = tone.apply(value)
     return value
