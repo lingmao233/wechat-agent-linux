@@ -1,5 +1,7 @@
 # 微信群聊 Agent · Linux
 
+> 在 DeepSeek Harness 里使用：**Attune**（微信 AI Agent / WeChat AI agent，搜 微信agent、微信ai、wechatagent、wechatai）— <https://github.com/lingmao233/dsh-plugin-attune-wechat-agent>
+
 以 Windows 仓库 `lingmao233/wechat-agent-windows` 的 `45333d608c1f656a7861f5278b5cf82aca568081` 为基线，保留聊天、人设、生图、联网研究、控制台和策略层，增加 Linux 平台适配与记忆、上下文、情绪运行时。
 
 Linux 通过本地 SQLCipher 数据库读取消息，通过 AT-SPI / X11 操作微信。发送结果必须有数据库回读凭据；原文、群事件、长期画像、情绪和成员关系分别保存，并使用稳定账号、群、成员 ID 隔离。
