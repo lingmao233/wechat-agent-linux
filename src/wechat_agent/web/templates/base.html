@@ -1,0 +1,51 @@
+{% from "_icons.html" import icon %}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>{% block title %}{{ title|default('控制台') }}{% endblock %} · 微信 Agent</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="page-{{ active }}" data-timezone="{{ group_timezone }}">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="微信 Agent 首页">
+        <span class="brand-symbol"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 13.5c0-4.4 3.2-7.5 7.5-7.5 3.7 0 6.5 2.4 6.5 5.8 0 3.9-3.4 6.2-7.2 6.2-1.2 0-2.3-.2-3.2-.7L5 20l.8-3.4c-.5-.9-.8-2-.8-3.1Z" fill="currentColor"/><path d="M8 11h.01M12 11h.01M16 11h.01" stroke="white" stroke-width="2.2" stroke-linecap="round"/></svg></span>
+        <span><strong>微信 Agent</strong><small>PERSONAL WORKSPACE</small></span>
+      </a>
+      <div class="nav-caption">工作区</div>
+      <nav class="nav" aria-label="主导航">
+        {% for item in nav %}
+        <a href="{{ item[1] }}"{% if item[0] == active %} class="active" aria-current="page"{% endif %}>{{ icon(item[3]) }}<span>{{ item[2] }}</span>{% if item[0] == active %}<span class="nav-active-mark"></span>{% endif %}</a>
+        {% endfor %}
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="sidebar-status">
+          <span class="status-orbit{% if status.thread_alive %} on{% endif %}" id="sidebarDot"><i></i></span>
+          <div><strong id="sidebarStatus">{{ '助手运行中' if status.thread_alive else phase_text }}</strong><small>本地服务 · 自动保存</small></div>
+        </div>
+        <div class="sidebar-foot">WECHAT AGENT <span>v0.2</span></div>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <div class="breadcrumb"><span>微信 Agent</span><b>/</b><strong>{{ title|default('控制台') }}</strong></div>
+        <span class="connection ok" id="lastUpdate"><i></i><span>本地已连接</span></span>
+      </div>
+      <header class="page-header">
+        <div>
+          <h1>{% block heading %}{{ title|default('微信 Agent') }}{% endblock %}</h1>
+          <p>{% block subtitle %}管理你的对话、偏好与记忆。{% endblock %}</p>
+        </div>
+        <div class="header-actions">{% block header_actions %}{% endblock %}</div>
+      </header>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,21 @@
+comtypes>=1.4.0; sys_platform == "win32"
+cryptography>=42.0.0
+Pillow>=10.0.0
+imageio-ffmpeg>=0.6.0
+av>=12,<17
+pilk==0.2.4
+zstandard>=0.22.0
+numpy>=1.26.0
+httpx>=0.27.0
+Jinja2>=3.1
+pydantic>=2.7.0
+pydantic-settings>=2.2.1
+python-dotenv>=1.0.0
+pyperclip>=1.8.2
+SQLAlchemy>=2.0.0
+psycopg[binary]>=3.2.0
+pgvector>=0.3.0
+alibabacloud-oss-v2==1.4.0
+wechatauto-replica==1.2.7.0; sys_platform == "win32"
+uiautomation>=2.0.18; platform_system == "Windows"
+playwright>=1.48.0

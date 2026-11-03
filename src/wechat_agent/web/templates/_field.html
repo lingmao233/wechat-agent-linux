@@ -1,0 +1,34 @@
+{% macro field(f) -%}
+<div class="setting-field{% if f.type == 'text' and f.description|length > 70 %} full{% endif %}{% if f.widget.probability %} probability-field{% endif %}"{% if f.env == 'WECHAT_PRIVATE_CHAT_NAMES' %} id="private-allowlist"{% endif %} data-env="{{ f.env }}">
+  {% if f.type == 'checkbox' %}
+  <input type="hidden" name="{{ f.env }}" value="false">
+  <label class="switch-row">
+    <span class="switch-copy"><b>{{ f.label }}</b><small>{{ f.description }}</small></span>
+    <input class="switch-input" id="field-{{ f.env }}" type="checkbox" name="{{ f.env }}" value="true"{% if f.value %} checked{% endif %}>
+    <span class="switch-ui"></span>
+  </label>
+  {% else %}
+  <label for="field-{{ f.env }}">{{ f.label }}{% if f.secret %}<span class="field-state">{{ '已配置' if f.configured else '未配置' }}</span>{% endif %}</label>
+  {% if f.type == 'select' %}
+  <select id="field-{{ f.env }}" name="{{ f.env }}">
+    {% for option in f.options %}<option value="{{ option }}"{% if f.value|string == option|string %} selected{% endif %}>{{ option }}</option>{% endfor %}
+  </select>
+  {% elif f.type == 'password' %}
+  <div class="secret-line">
+    <input id="field-{{ f.env }}" type="password" name="{{ f.env }}" value="" autocomplete="new-password" placeholder="{{ '已配置，留空保持原值' if f.configured else f.description }}">
+    {% if f.configured %}<button class="btn ghost small" type="submit" name="clear_secret" value="{{ f.env }}" data-clear-secret="{{ f.env }}">清空</button>{% endif %}
+  </div>
+  {% elif f.type == 'number' and f.widget.probability %}
+  <div class="probability-control">
+    <input type="range" min="{{ f.widget.min }}" max="{{ f.widget.max }}" step="{{ f.widget.step }}" value="{{ f.value }}" data-probability-range="field-{{ f.env }}" aria-label="{{ f.label }}滑块">
+    <div class="probability-number"><input id="field-{{ f.env }}" type="number" name="{{ f.env }}" value="{{ f.value }}" min="{{ f.widget.min }}" max="{{ f.widget.max }}" step="{{ f.widget.step }}" data-probability-number><output for="field-{{ f.env }}" data-probability-output>{{ ((f.value|float) * 100)|round|int }}%</output></div>
+  </div>
+  {% elif f.type == 'number' %}
+  <input id="field-{{ f.env }}" type="number" name="{{ f.env }}" value="{{ f.value }}"{% if f.widget.min is defined %} min="{{ f.widget.min }}"{% endif %}{% if f.widget.max is defined %} max="{{ f.widget.max }}"{% endif %}{% if f.widget.step is defined %} step="{{ f.widget.step }}"{% endif %} placeholder="{{ f.widget.placeholder|default('') }}">
+  {% else %}
+  <input id="field-{{ f.env }}" type="text" name="{{ f.env }}" value="{{ f.value }}" placeholder="{{ f.widget.placeholder|default('') }}">
+  {% endif %}
+  <small>{{ f.description }}</small>
+  {% endif %}
+</div>
+{%- endmacro %}

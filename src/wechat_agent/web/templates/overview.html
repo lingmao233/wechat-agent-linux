@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}概览{% endblock %}
+{% block heading %}运行概览{% endblock %}
+{% block subtitle %}助手状态与常用控制，一目了然。{% endblock %}
+{% block header_actions %}<button class="btn secondary" type="button" onclick="location.reload()">{{ icon('refresh', 15) }}刷新状态</button>{% endblock %}
+{% block content %}
+<div class="overview-grid">
+  <section class="card runtime-card">
+    <div class="card-kicker">AGENT STATUS</div>
+    <div class="runtime-main">
+      <div class="runtime-copy">
+        <div class="runtime-state"><span class="status-dot{% if status.thread_alive %} on{% endif %}" id="heroDot"></span><h2 id="heroPhase">{{ phase_text }}</h2></div>
+        <p id="heroHint">{{ hero_hint }}</p>
+      </div>
+      <label class="agent-control">
+        <input id="agentToggle" class="switch-input" type="checkbox"{% if status.thread_alive %} checked{% endif %}{% if status.phase in ['starting', 'stopping'] %} disabled{% endif %}>
+        <span class="switch-ui"></span>
+        <span id="agentToggleLabel">{{ '运行中' if status.thread_alive else '启动助手' }}</span>
+      </label>
+    </div>
+    <div class="runtime-meta">
+      <div><span>监听群聊</span><strong title="{{ group_summary }}">{{ group_summary }}</strong></div>
+      <div><span>发送模式</span><strong>{{ send_summary }}</strong></div>
+      <div><span>私聊边界</span><strong>{{ private_summary }}</strong></div>
+      <div><span>主动参与</span><strong id="proactiveSummary">{{ proactive_summary }}</strong></div>
+    </div>
+  </section>
+
+  <section class="card quick-card">
+    <div class="card-title-row"><div><div class="card-kicker">QUICK CONTROLS</div><h2>常用开关</h2></div><a href="/settings">全部设置{{ icon('arrow', 14) }}</a></div>
+    <div class="quick-grid">
+      {% for item in quick_switches %}
+      <label class="quick-switch" title="{{ item.hint }}"><span>{{ item.label }}</span><input class="switch-input" type="checkbox" data-quick-env="{{ item.env }}"{% if item.value %} checked{% endif %}><span class="switch-ui"></span></label>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+<section class="metric-grid" aria-label="运行统计">
+  <article class="metric-card"><div class="metric-icon blue">{{ icon('send') }}</div><div><span>今日回复</span><strong id="todayReplies">{{ today_replies }}</strong><small>累计发送 {{ total_sent }} 条</small></div></article>
+  <article class="metric-card"><div class="metric-icon violet">{{ icon('logs') }}</div><div><span>本次处理</span><strong id="seenCount">{{ stats.seen }}</strong><small>启动后收到的新消息</small></div></article>
+  <article class="metric-card"><div class="metric-icon green">{{ icon('echo') }}</div><div><span>完成回复</span><strong id="replyCount">{{ stats.replied }}</strong><small>去重 {{ stats.duplicate }} 条</small></div></article>
+  <article class="metric-card"><div class="metric-icon amber">{{ icon('event') }}</div><div><span>异常任务</span><strong id="failedCount">{{ stats.failed }}</strong><small>详情请前往日志页</small></div></article>
+</section>
+
+<div class="overview-footer"><span>{{ icon('shield', 15) }}所有数据保存在本地，页面关闭不会停止助手。</span><a href="/logs">查看运行日志{{ icon('arrow', 14) }}</a></div>
+{% endblock %}
+{% block scripts %}<script src="/static/overview.js"></script>{% endblock %}

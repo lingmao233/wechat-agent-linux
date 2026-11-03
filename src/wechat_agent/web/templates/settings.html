@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% from "_field.html" import field %}
+{% block title %}设置{% endblock %}
+{% block heading %}设置{% endblock %}
+{% block subtitle %}把常用选择放在手边，把复杂参数留在合适的位置。{% endblock %}
+{% block header_actions %}<span class="soft-badge">{{ total_count }} 个配置项</span>{% endblock %}
+{% block content %}
+<nav class="workspace-tabs" aria-label="设置分类">{% for tab in settings_tabs %}<a href="{{ tab.url }}"{% if tab.active %} class="active" aria-current="page"{% endif %}>{{ tab.label }}</a>{% endfor %}</nav>
+{% if saved %}<div class="notice success" id="settingsSaved"><span>设置已保存，助手已重新加载。地址或端口变更仍需重启控制台。</span></div>{% endif %}
+{% if error %}<div class="notice error" id="settingsError"><span>保存失败：{{ error }}</span></div>{% endif %}
+
+{% if selected_section == 'advanced' %}<nav class="category-tabs" aria-label="高级配置分类">{% for tab in advanced_tabs %}<a href="{{ tab.url }}"{% if tab.active %} class="active"{% endif %}>{{ tab.name }}<span>{{ tab.count }}</span></a>{% endfor %}</nav>{% endif %}
+
+{% if selected_section == 'advanced' %}
+<form id="settings-advanced-form" class="settings-form" method="post" action="{{ form_action }}" data-settings-form data-hint="settingsSaveHint">
+  {% for group in advanced_groups %}<section class="card settings-card"><div class="settings-card-head"><div><h2>{{ group.name }}</h2><p>{{ group.count }} 项高级参数，只修改需要调整的部分。</p></div><span class="soft-badge">高级</span></div><div class="setting-grid">{% for item in group.fields %}{{ field(item) }}{% endfor %}</div></section>{% endfor %}
+  <div class="settings-savebar"><span id="settingsSaveHint">保存后自动重载，不会重启控制台服务。</span><button class="btn" type="submit" id="saveAdvanced">保存本页设置</button></div>
+</form>
+{% else %}
+{% set hoist_model = selected_section == 'general' %}
+{% if hoist_model %}
+{% for group in visible_groups if group.name == '模型' %}
+<form id="settings-model-form" class="settings-form settings-form-model" method="post" action="{{ form_action }}" data-settings-form data-hint="settingsModelHint">
+  <section class="card settings-card settings-model-card">
+    <div class="settings-card-head"><div><h2>{{ group.name }}</h2><p>{{ group.hint }}</p></div><span class="soft-badge">常用</span></div>
+    <div class="setting-grid">{% for item in group.fields %}{{ field(item) }}{% endfor %}</div>
+    <div class="settings-inline-save"><span id="settingsModelHint">模型地址、Key 与模型名会写入本机 .env，保存后自动重载。</span><button class="btn secondary small" type="submit" id="saveModel">保存模型设置</button></div>
+  </section>
+</form>
+{% endfor %}
+{% endif %}
+<form id="settings-visible" class="settings-form" method="post" action="{{ form_action }}" data-settings-form data-hint="settingsSaveHint">
+  {% for group in visible_groups if not hoist_model or group.name != '模型' %}
+  <section class="card settings-card">
+    <div class="settings-card-head"><div><h2>{{ group.name }}</h2><p>{{ group.hint }}</p></div>{% if group.name == '微信' %}<a class="text-link" href="#private-allowlist">跳转到私聊白名单{{ icon('arrow', 13) }}</a>{% endif %}</div>
+    <div class="setting-grid">{% for item in group.fields %}{{ field(item) }}{% endfor %}</div>
+    {% if group.name == '微信' and show_private %}
+    <div class="private-picker" id="privateContacts"><div class="private-picker-head"><div><h3>从微信选择联系人</h3><p>读取结果只会写入上方白名单，点击保存后生效。私聊默认不主动发送信息。</p></div><button class="btn secondary small" type="button" id="loadPrivateChats">读取联系人</button></div><div class="private-list" id="privateContactList"><span class="muted">尚未读取联系人，也可以直接填写稳定 wxid。</span></div></div>
+    {% endif %}
+    {% if group.name == '人设' %}
+    <div class="persona-upload" id="personaUpload" data-upload-endpoint="/api/personas/upload" data-catalog-endpoint="/api/personas">
+      <div class="persona-upload-head"><div><h3>上传人设文件或文件夹</h3><p>支持 .md、.markdown、.txt、.json、.yaml、.yml、.toml、.ini、.csv；单次最多 200 个文件、总计 5 MB，拖入整个文件夹会保留 references/ 等子目录。</p></div><span class="soft-badge" id="personaCount">未选择文件</span></div>
+      <div class="persona-drop" id="personaDrop">
+        <div class="persona-drop-icon">{{ icon('send', 18) }}</div>
+        <p class="persona-drop-main">把文件或文件夹拖到这里</p>
+        <p class="persona-drop-sub">主文件优先使用 SKILL.md，其次顶层第一个 .md；也可以直接复制到 personas/ 目录。</p>
+        <div class="persona-drop-actions"><label class="btn secondary small" for="personaFileInput">选择文件</label><label class="btn secondary small" for="personaDirInput">选择文件夹</label></div>
+        <input class="persona-hidden-input" id="personaFileInput" type="file" multiple accept=".md,.markdown,.txt,.json,.yaml,.yml,.toml,.ini,.csv" aria-label="选择人设文件">
+        <input class="persona-hidden-input" id="personaDirInput" type="file" webkitdirectory directory multiple aria-label="选择人设文件夹">
+      </div>
+      <div class="persona-options">
+        <label class="persona-field" for="personaNameInput"><span>目标人设名称</span><input id="personaNameInput" type="text" maxlength="64" placeholder="例如 my_persona" autocomplete="off"></label>
+        <label class="persona-check"><input id="personaOverwrite" type="checkbox"> 覆盖同名文件</label>
+        <label class="persona-check"><input id="personaApply" type="checkbox" checked> 上传后设为当前人设（写入 .env 并重载）</label>
+      </div>
+      <div class="persona-actions"><button class="btn small" type="button" id="personaUploadBtn" disabled>开始上传</button><button class="btn ghost small" type="button" id="personaRefreshBtn">刷新已有人设</button></div>
+      <div class="persona-status" id="personaStatus" role="status" aria-live="polite">先选择文件或文件夹；同名人设需要勾选覆盖。</div>
+      <div class="persona-current" id="personaCurrent"></div>
+      <div class="persona-list" id="personaList" hidden></div>
+      <noscript><p class="persona-hint">拖拽上传需要启用 JavaScript；也可以直接把文件夹复制到 <code>personas/</code> 后刷新页面。</p></noscript>
+    </div>
+    {% endif %}
+  </section>
+  {% endfor %}
+  <div class="settings-savebar"><span id="settingsSaveHint">修改仅保存在本机 .env，保存后自动重载。</span><button class="btn" type="submit" id="saveVisible">保存本页设置</button></div>
+</form>
+{% endif %}
+<footer class="settings-foot"><span title="{{ config_path }}">配置文件：<code>{{ config_path }}</code></span><a href="/api/config" target="_blank" rel="noopener">查看完整 JSON{{ icon('arrow', 12) }}</a></footer>
+{% endblock %}
+{% block scripts %}<script src="/static/settings.js"></script>{% endblock %}

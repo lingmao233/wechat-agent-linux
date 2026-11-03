@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}回声{% endblock %}
+{% block heading %}回声{% endblock %}
+{% block subtitle %}成员、群像与会话记忆，在同一个地方彼此印证。{% endblock %}
+{% block header_actions %}<a class="btn secondary" href="/memory?view={{ view }}">{{ icon('refresh', 15) }}刷新</a>{% endblock %}
+{% block content %}
+<nav class="workspace-tabs" aria-label="回声视图">
+  {% for tab in tabs %}<a href="{{ tab.url }}"{% if tab.active %} class="active" aria-current="page"{% endif %}>{{ icon(tab.icon, 16) }}{{ tab.label }}</a>{% endfor %}
+</nav>
+
+<section class="memory-toolbar card">
+  <form method="get" action="/memory" id="memoryScope">
+    <input type="hidden" name="view" value="{{ view }}">
+    <label class="compact-field"><span>账号</span><select name="account_id">{% for account in accounts %}<option value="{{ account }}"{% if account == selected_account %} selected{% endif %}>{{ account }}</option>{% endfor %}</select></label>
+    <label class="compact-field grow"><span>{% if view == 'groups' %}选择群聊{% else %}会话范围{% endif %}</span><select name="group_id">
+      {% if view == 'members' %}<option value="">全部群聊</option>{% endif %}
+      {% for item in scopes %}<option value="{{ item.group_id }}"{% if scope and item.group_id == scope.group_id %} selected{% endif %}>{{ item.group_name }} · {{ item.message_count }} 条</option>{% endfor %}
+    </select></label>
+    <button class="btn secondary" type="submit">应用</button>
+  </form>
+  {% if view == 'members' and not member_detail %}<label class="search-box">{{ icon('search', 16) }}<input id="memberSearch" type="search" placeholder="搜索成员昵称、ID 或群聊…" aria-label="搜索成员" autocomplete="off"><kbd>⌘ K</kbd></label>{% endif %}
+</section>
+
+{% for warning in warnings %}<div class="notice warning"><span>{{ warning }}</span>{% if scope %}<button class="btn secondary small" type="button" id="retryAnalysis" data-account="{{ scope.account_id }}" data-group="{{ scope.group_id }}">重试失败任务</button>{% endif %}</div>{% endfor %}
+{% if source %}<div class="notice source" id="memorySource"><div><b>来源原文</b><span>{{ source.actor_name }} · {{ source.at_text }}</span><p>{{ source.content }}</p></div><a class="btn ghost small" href="/memory?view={{ view }}&account_id={{ scope.account_id|urlencode }}&group_id={{ scope.group_id|urlencode }}">关闭</a></div>
+{% elif source_identifier %}<div class="notice warning"><span>找不到来源 {{ source_identifier }}，可能已被清理或不在当前会话。</span></div>{% endif %}
+
+{% if not scopes %}
+<section class="card empty-state"><div class="empty-icon">{{ icon('echo', 26) }}</div><h2>回声还在积蓄</h2><p>{% if view in ['members', 'groups'] %}收到群聊消息后，这里会生成成员与群组画像。私聊不会混入群像。{% else %}完成消息入库后，这里会显示可追溯的记忆。{% endif %}</p></section>
+
+{% elif view == 'members' %}
+  {% if member_detail %}
+  <a class="back-link" href="/memory?view=members&account_id={{ member_detail.scope.account_id|urlencode }}&group_id={{ member_detail.scope.group_id|urlencode }}">{{ icon('back', 15) }}返回成员列表</a>
+  <section class="card detail-hero">
+    <div class="person-avatar large">{{ member_detail.member_name[:1] }}</div>
+    <div class="detail-identity"><div class="card-kicker">MEMBER PROFILE</div><h2>{{ member_detail.member_name }}</h2><p>{{ member_detail.member_id }} · {{ member_detail.scope.group_name }}</p></div>
+    <div class="affinity-score"><strong>{{ member_detail.relationship.affinity }}</strong><span>/ 100</span><small>{{ member_detail.relationship.mode_label }}</small></div>
+  </section>
+  <div class="detail-grid">
+    <section class="card detail-card"><div class="card-title-row"><div><div class="card-kicker">LONG-TERM</div><h2>长期画像</h2></div><span class="soft-badge">{{ member_detail.profile.count }} 条</span></div>
+      <div class="profile-list">{% for field in member_detail.profile.fields %}<div class="profile-section"><h3>{{ field.label }}</h3>{% for item in field['items'] %}<p>{{ item }}</p>{% endfor %}</div>{% else %}<div class="empty-inline">还没有长期画像，随着有来源的发言逐步生成。</div>{% endfor %}</div>
+    </section>
+    <section class="card detail-card"><div class="card-title-row"><div><div class="card-kicker">RELATIONSHIP</div><h2>关系状态</h2></div><span class="soft-badge">{{ member_detail.relationship.evaluated_at or '待评估' }}</span></div>
+      <div class="mini-metrics"><div><span>好感基线</span><strong>{{ member_detail.relationship.base_affinity }}</strong></div><div><span>正向积累</span><strong>+{{ member_detail.relationship.positive_credit }}</strong></div><div><span>临时扣分</span><strong>-{{ member_detail.relationship.penalty }}</strong></div></div>
+      {% if member_detail.relationship.top_labels %}<div class="chip-list">{% for label in member_detail.relationship.top_labels %}<span class="chip">{{ label[0] }} · {{ '%.2f'|format(label[1]) }}</span>{% endfor %}</div>{% endif %}
+      <div class="recent-events"><h3>最近关系事件</h3>{% for event in member_detail.events[:6] %}<div class="event-line"><span class="chip">{{ event.type_label }}</span><p>{{ event.evidence_excerpt or event.content }}<small>{{ event.at_text }} · {{ event.status_label }}</small></p></div>{% else %}<div class="empty-inline">暂无关系事件。</div>{% endfor %}</div>
+    </section>
+  </div>
+  <details class="compact-fold card"><summary>最近发言与画像历史{{ icon('chevron', 15) }}</summary><div class="fold-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>时间</th><th>内容</th><th>消息 ID</th></tr></thead><tbody>{% for message in member_detail.messages %}<tr><td>{{ message.at_text }}</td><td>{{ message.text }}</td><td><small>{{ message.id }}</small></td></tr>{% else %}<tr><td colspan="3"><div class="empty-inline">暂无发言记录。</div></td></tr>{% endfor %}</tbody></table></div>{% if member_detail.profile_history %}<div class="history-note">最近画像变更：{% for item in member_detail.profile_history[:5] %}{{ item.at_text }} · {{ item.changes }}{{ '；' if not loop.last }}{% endfor %}</div>{% endif %}</div></details>
+
+  {% else %}
+  <div class="list-caption"><span>按好感度排序，点击成员查看完整画像。</span><strong id="memberResultCount">{{ total_members }} 位成员</strong></div>
+  <div id="memberList">
+  {% for group in member_groups %}
+    <section class="card member-group" data-member-group>
+      <div class="list-header"><div><h2>{{ group.group_name }}</h2><p>{{ group.member_count }} 位成员 · {{ group.message_count }} 条消息{% if group.last_active_text %} · 最近 {{ group.last_active_text }}{% endif %}</p></div><span class="soft-badge">{{ icon('group', 13) }}群聊</span></div>
+      <div class="table-wrap member-table-wrap"><table class="data-table member-table"><thead><tr><th>成员</th><th>好感度</th><th>画像摘要</th><th>最近事件</th><th></th></tr></thead><tbody>
+        {% for member in group.members %}<tr data-member-row data-search="{{ (member.member_name ~ ' ' ~ member.member_id ~ ' ' ~ group.group_name)|lower }}">
+          <td><a class="member-name" href="{{ member.url }}"><span class="person-avatar">{{ member.member_name[:1] }}</span><span><strong>{{ member.member_name }}</strong><small>{{ member.member_id }}</small></span></a></td>
+          <td><div class="affinity-cell"><div><strong>{{ member.affinity }}</strong><small>{{ member.mode_label }}</small></div><span class="affinity-track"><i style="width:{{ member.affinity_value }}%"></i></span></div></td>
+          <td><div class="chip-list">{% for item in member.profile_preview[:2] %}<span class="chip">{{ item }}</span>{% else %}<span class="muted">画像积累中</span>{% endfor %}</div></td>
+          <td>{% if member.recent_events %}<span>{{ member.recent_events[0].type_label }}</span><small class="table-subtext">{{ member.recent_events[0].at_text }}</small>{% else %}<span class="muted">暂无</span>{% endif %}</td>
+          <td><a class="row-action" href="{{ member.url }}" aria-label="查看 {{ member.member_name }}">{{ icon('chevron', 16) }}</a></td>
+        </tr>{% else %}<tr><td colspan="5"><div class="empty-inline">本群暂无成员记录。</div></td></tr>{% endfor %}
+      </tbody></table></div>
+    </section>
+  {% endfor %}
+  </div>
+  <section class="card empty-state" id="memberSearchEmpty" hidden><div class="empty-icon">{{ icon('search', 24) }}</div><h2>没有匹配的成员</h2><p>试试昵称、稳定 ID 或群名。</p></section>
+  {% endif %}
+
+{% elif view == 'groups' %}
+<div class="group-layout">
+  <aside class="card group-list"><div class="list-header"><div><h2>群聊</h2><p>仅显示群组，不包含私聊</p></div><span class="soft-badge">{{ scopes|length }}</span></div><div class="group-list-scroll">
+    {% for item in scopes %}<a class="group-list-item{% if scope and item.group_id == scope.group_id %} active{% endif %}" href="{{ item.url }}"><span class="group-avatar">{{ item.group_name[:1] }}</span><span><strong>{{ item.group_name }}</strong><small>{{ item.message_count }} 条 · {{ item.last_active_text or '尚未活跃' }}</small></span>{{ icon('chevron', 14) }}</a>{% endfor %}
+  </div></aside>
+  {% if group_detail %}{% set detail = group_detail %}
+  <div class="group-detail">
+    <section class="card group-hero"><div><div class="card-kicker">GROUP PROFILE</div><h2>{{ detail.group_name }}</h2><p>{{ detail.group_id }}</p></div><div class="group-hero-meta"><span class="soft-badge">{% if detail.semantic.version %}画像第 {{ detail.semantic.version }} 版{% else %}画像等待生成{% endif %}</span>{% if emotion and emotion.mood is not none %}<span class="mood-pill">群心情 {{ emotion.mood }}</span>{% endif %}</div></section>
+    <div class="semantic-grid">
+      <section class="card semantic-card"><div class="card-title-row"><h3>氛围</h3><span class="soft-badge">{{ detail.semantic.atmosphere|length }}</span></div>{% for item in detail.semantic.atmosphere[:5] %}<div class="semantic-item"><p>{{ item.text }}</p><small>置信度 {{ item.confidence_pct }}% · {{ item.sources|length }} 条来源</small></div>{% else %}<div class="empty-inline">尚无氛围画像。</div>{% endfor %}</section>
+      <section class="card semantic-card"><div class="card-title-row"><h3>兴趣与话题</h3><span class="soft-badge">{{ detail.semantic.interests|length }}</span></div>{% for item in detail.semantic.interests[:6] %}<div class="semantic-item"><p>{{ item.topic or item.text }} {% if item.classification_label %}<span class="chip accent">{{ item.classification_label }}</span>{% endif %}</p><small>{{ item.text }} · {{ item.confidence_pct }}%</small></div>{% else %}<div class="empty-inline">尚无兴趣画像。</div>{% endfor %}</section>
+      <section class="card semantic-card"><div class="card-title-row"><h3>群梗</h3><span class="soft-badge">{{ detail.semantic.memes|length }}</span></div>{% for item in detail.semantic.memes[:6] %}<div class="semantic-item"><p>{{ item.phrase or item.text }}{% if item.overused %} <span class="chip amber">近期较多</span>{% endif %}</p><small>{{ item.at_text or '持续观察中' }}</small></div>{% else %}<div class="empty-inline">还没有识别到群梗。</div>{% endfor %}</section>
+      <section class="card semantic-card"><div class="card-title-row"><h3>表达风格</h3><span class="soft-badge">{{ detail.style.observed_count or 0 }} 条样本</span></div>{% if detail.style.profile %}<p class="style-summary">{{ detail.style.profile }}</p>{% else %}<div class="empty-inline">样本不足，继续收集普通群消息。</div>{% endif %}</section>
+    </div>
+    <details class="compact-fold card"><summary>互动习惯、接话建议与群约定{{ icon('chevron', 15) }}</summary><div class="fold-body semantic-more">{% for key in ['expression_style', 'interaction_patterns', 'participation_guidance', 'observations', 'explicit_rules'] %}{% set section = detail.semantic.sections[key] %}<section><h3>{{ section.label }}</h3>{% for item in section.entries %}<div class="semantic-item"><p>{{ item.text }}</p><small>置信度 {{ item.confidence_pct }}% · {{ item.sources|length }} 条来源</small></div>{% else %}<div class="empty-inline">暂未归纳。</div>{% endfor %}</section>{% endfor %}</div></details>
+    <details class="compact-fold card"><summary>群时间线与最近发言{{ icon('chevron', 15) }}</summary><div class="fold-body">{% if detail.timeline %}<div class="timeline-list">{% for item in detail.timeline[:8] %}<div><time>{{ item.date }}</time><p>{{ item.summary }}<small>{{ item.topics }}{% if item.members %} · {{ item.members }}{% endif %}</small></p></div>{% endfor %}</div>{% endif %}<div class="table-wrap"><table class="data-table"><thead><tr><th>时间</th><th>成员</th><th>内容</th></tr></thead><tbody>{% for message in detail.messages %}<tr><td>{{ message.at_text }}</td><td>{{ message.member_name }}</td><td>{{ message.text }}</td></tr>{% else %}<tr><td colspan="3"><div class="empty-inline">暂无群消息。</div></td></tr>{% endfor %}</tbody></table></div></div></details>
+  </div>
+  {% endif %}
+</div>
+
+{% elif view == 'facts' and scope %}
+<section class="card data-card">
+  <div class="data-card-head"><div><h2>记忆片段</h2><p>每条事实都能回到原消息。</p></div><span class="soft-badge">{{ facts.total }} 条</span></div>
+  <form class="filter-bar" method="get" action="/memory"><input type="hidden" name="view" value="facts"><input type="hidden" name="account_id" value="{{ scope.account_id }}"><input type="hidden" name="group_id" value="{{ scope.group_id }}"><label class="compact-field"><span>成员</span><select name="member_id"><option value="">全部成员</option>{% for item in facts.members %}<option value="{{ item.id }}"{% if item.id == filters.member_id %} selected{% endif %}>{{ item.name }}（{{ item.count }}）</option>{% endfor %}</select></label><label class="compact-field"><span>类型</span><select name="memory_type"><option value="">全部类型</option>{% for item in facts.types %}<option value="{{ item }}"{% if item == filters.memory_type %} selected{% endif %}>{{ item }}</option>{% endfor %}</select></label><button class="btn secondary" type="submit">筛选</button><a class="btn ghost" href="/memory?view=facts&account_id={{ scope.account_id|urlencode }}&group_id={{ scope.group_id|urlencode }}">清空</a></form>
+  <div class="table-wrap tall"><table class="data-table"><thead><tr><th>记忆内容</th><th>成员</th><th>类型 / 状态</th><th>时间</th><th>来源</th></tr></thead><tbody>{% for fact in facts.rows %}<tr><td><strong class="fact-text">{{ fact.content }}</strong><small class="table-subtext">置信度 {{ fact.confidence_pct }}%</small></td><td>{{ fact.member_name }}<small class="table-subtext">{{ fact.member_id }}</small></td><td><span class="chip">{{ fact.memory_type }}</span><small class="table-subtext">{{ fact.status_label }}</small></td><td>{{ fact.at_text }}</td><td><div class="source-links">{% for source_id in fact.sources %}<a class="btn ghost small" href="/memory?view=facts&account_id={{ scope.account_id|urlencode }}&group_id={{ scope.group_id|urlencode }}&member_id={{ filters.member_id|urlencode }}&memory_type={{ filters.memory_type|urlencode }}&source={{ source_id|urlencode }}">原文 {{ loop.index }}</a>{% else %}<span class="muted">无来源</span>{% endfor %}</div></td></tr>{% else %}<tr><td colspan="5"><div class="empty-inline">还没有记忆片段。</div></td></tr>{% endfor %}</tbody></table></div>
+</section>
+<details class="compact-fold card"><summary>处理历史消息（replay）{{ icon('chevron', 15) }}</summary><div class="fold-body"><p class="muted">只处理当前账号、当前会话与明确时间范围，不回填情绪，也不会发送消息。</p><div class="filter-bar"><label class="compact-field"><span>开始时间</span><input type="datetime-local" id="replaySince"></label><label class="compact-field"><span>结束时间</span><input type="datetime-local" id="replayUntil"></label><button class="btn secondary" type="button" id="replayDryRun" data-account="{{ scope.account_id }}" data-group="{{ scope.group_id }}">预演</button><button class="btn" type="button" id="replayApply" data-account="{{ scope.account_id }}" data-group="{{ scope.group_id }}">应用</button></div><pre class="code-output" id="replayResult">尚未执行。</pre></div></details>
+
+{% elif view == 'events' and scope %}
+<section class="card data-card"><div class="data-card-head"><div><h2>关系事件</h2><p>事件影响可撤销，审计记录始终保留。</p></div><span class="soft-badge">{{ events|length }} 条</span></div>
+  <form class="filter-bar" method="get" action="/memory"><input type="hidden" name="view" value="events"><input type="hidden" name="account_id" value="{{ scope.account_id }}"><input type="hidden" name="group_id" value="{{ scope.group_id }}"><label class="compact-field"><span>事件类型</span><select name="event_type"><option value="">全部事件</option>{% for value, label in event_types %}<option value="{{ value }}"{% if value == event_filters.event_type %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><label class="compact-field"><span>成员 ID</span><input type="text" name="event_member" value="{{ event_filters.member_id }}" placeholder="留空看全部"></label><button class="btn secondary" type="submit">筛选</button><a class="btn ghost" href="/memory?view=events&account_id={{ scope.account_id|urlencode }}&group_id={{ scope.group_id|urlencode }}">清空</a></form>
+  <div class="table-wrap tall" id="memoryEvents"><table class="data-table"><thead><tr><th>时间 / 成员</th><th>事件与证据</th><th>状态</th><th></th></tr></thead><tbody>{% for event in events %}<tr><td>{{ event.at_text }}<small class="table-subtext">{{ event.actor_name }} · {{ event.actor_id }}</small></td><td><span class="chip">{{ event.type_label }}</span><p class="table-copy">{{ event.content }}</p><small class="table-subtext">{{ event.evidence_excerpt }}</small></td><td>{{ event.status_label }}<small class="table-subtext">版本 {{ event.object_version }}</small></td><td>{% if event.status in ['active', 'candidate'] %}<button class="btn ghost small" type="button" data-revert-event="{{ event.memory_id }}" data-expected-version="{{ event.object_version }}" data-account="{{ scope.account_id }}" data-group="{{ scope.group_id }}">撤销影响</button>{% endif %}</td></tr>{% else %}<tr><td colspan="4"><div class="empty-inline">还没有关系事件。</div></td></tr>{% endfor %}</tbody></table></div>
+</section>
+
+{% elif view == 'traces' and scope %}
+<section class="card data-card"><div class="data-card-head"><div><h2>回答依据</h2><p>回看每次回答用到的画像版本与证据。</p></div><span class="soft-badge">{{ traces|length }} 次</span></div>
+  <form class="filter-bar" method="get" action="/memory"><input type="hidden" name="view" value="traces"><input type="hidden" name="account_id" value="{{ scope.account_id }}"><input type="hidden" name="group_id" value="{{ scope.group_id }}"><label class="compact-field grow"><span>选择一次回答</span><select name="trace" id="traceChoice">{% for item in traces %}<option value="{{ item.request_id }}"{% if item.request_id == selected_trace %} selected{% endif %}>{{ item.at_text }} · {{ item.status }} · {{ item.request_id[:12] }}</option>{% else %}<option value="">还没有检索记录</option>{% endfor %}</select></label><button class="btn secondary" type="submit">查看</button></form>
+  {% if trace_detail %}<p class="trace-caption">请求 {{ selected_trace }} 的完整检索快照，只读。</p><pre class="code-output trace-output" id="memoryTrace">{{ trace_json }}</pre>{% else %}<div class="empty-state compact"><div class="empty-icon">{{ icon('trace', 24) }}</div><h2>还没有回答依据</h2><p>回答一次带记忆的问题后，就能在这里回看。</p></div>{% endif %}
+</section>
+{% endif %}
+{% endblock %}
+{% block scripts %}<script src="/static/memory.js"></script>{% endblock %}

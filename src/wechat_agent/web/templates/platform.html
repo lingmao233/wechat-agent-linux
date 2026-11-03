@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}平台{% endblock %}
+{% block heading %}平台{% endblock %}
+{% block subtitle %}抖音、小红书与微信三号互联：账号状态、账号关联、浏览与评论、动作台账、平台记忆和主动浏览。{% endblock %}
+{% block header_actions %}<span class="soft-badge{% if write_enabled %} on{% endif %}" id="platformWriteState">{{ write_state_text }}</span><button class="btn secondary small" type="button" data-platform-refresh-all>{{ icon('refresh', 13) }}刷新平台数据</button>{% endblock %}
+{% block content %}
+<section class="card platform-boundary" aria-label="平台写操作边界说明">
+  <div class="platform-boundary-head">
+    <span class="boundary-icon">{{ icon('shield', 20) }}</span>
+    <div><h2>平台边界说明</h2><p>这里可以查看、浏览和规划平台动作；真实发送永远不会静默发生。</p></div>
+  </div>
+  <ul class="boundary-list">
+    <li><b>默认 dry-run</b><span>浏览、评论计划默认只写入动作台账，不会触发真实发送。</span></li>
+    <li><b>写开关 + 台账确认</b><span>真实发送还需在「设置 → 平台」打开写开关，并在动作台账里二次确认。</span></li>
+    <li><b>遇到验证码就停手</b><span>验证码、安全验证、登录失效或页面异常时会停止并记录原因，不绕过。</span></li>
+  </ul>
+</section>
+
+<section class="platform-allowlist-strip" aria-label="有效 @ 白名单">
+  <div class="allowlist-strip-head"><span class="card-kicker">有效 @ 白名单</span><small>配置白名单 ∪ 已绑定的平台账号 ID；绑定后不需要再手动抄一遍。</small></div>
+  <div class="allowlist-strip-body" id="platformAllowlist">
+    {% for item in platform_allowlist %}
+    <div class="allowlist-group" data-allowlist-platform="{{ item.platform }}"><span class="chip accent">{{ item.label }}</span>{% if item.ids %}<div class="chip-list">{% for user_id in item.ids %}<code class="platform-code">{{ user_id }}</code>{% endfor %}</div>{% else %}<span class="muted">暂无白名单 ID</span>{% endif %}</div>
+    {% endfor %}
+  </div>
+</section>
+
+<section aria-label="平台账号状态">
+  <div class="platform-section-head"><div><h2>账号状态</h2><p>扫码登录由本人在可见浏览器里完成；打开浏览器后刷新查看登录状态。</p></div><span class="soft-badge">抖音 / 小红书</span></div>
+  <div class="platform-grid">
+    {% for card in platform_accounts %}
+    <article class="card platform-card" data-platform-card="{{ card.platform }}">
+      <div class="platform-card-head">
+        <div class="platform-card-identity">
+          <span class="platform-avatar">{{ card.short }}</span>
+          <div><h2>{{ card.label }}</h2><p>{{ card.mode_label }} · {{ card.account_id }}</p></div>
+        </div>
+        <span class="chip {{ card.status_kind }}" data-platform-state>{{ card.status_text }}</span>
+      </div>
+      <div class="platform-facts">
+        <div><span>登录状态</span><strong data-platform-login>{{ card.login_text }}</strong></div>
+        <div><span>浏览器</span><strong data-platform-connected>{{ card.connected_text }}</strong></div>
+        <div><span>写开关</span><strong>{{ '已开启' if card.write_enabled else '关闭' }}</strong></div>
+      </div>
+      <div class="platform-allowlist"><span>有效 @ 白名单</span><div class="chip-list" data-platform-allowlist>{% for user_id in card.mention_ids %}<code class="platform-code">{{ user_id }}</code>{% else %}<span class="muted">暂无</span>{% endfor %}</div></div>
+      {% if card.challenge %}<p class="platform-card-warn">检测到验证/风控提示：{{ card.challenge }}。请人工处理后重试，助手不会绕过。</p>{% elif card.last_error %}<p class="platform-card-warn">最近错误：{{ card.last_error }}</p>{% endif %}
+      <div class="platform-card-actions">
+        <button class="btn small" type="button" data-platform-open>{{ icon('external', 13) }}打开浏览器</button>
+        <button class="btn secondary small" type="button" data-platform-close>{{ icon('unlink', 13) }}关闭浏览器</button>
+        <button class="btn ghost small" type="button" data-platform-refresh>{{ icon('refresh', 13) }}刷新</button>
+      </div>
+      <p class="platform-card-note">登录态保存在本机浏览器数据目录，重启控制台不会丢失。</p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card data-card platform-section" id="platformIdentity">
+  <div class="data-card-head"><div><h2>账号关联（三号互联）</h2><p>同一自然人 = 一个微信成员 + 各平台稳定 ID；关联后平台 @ 白名单自动包含这些 ID。</p></div><span class="soft-badge" id="identityCount">{{ platform_identities|length }} 条关联</span></div>
+  <form class="platform-bind-form" id="identityForm" autocomplete="off">
+    <label class="compact-field"><span>平台</span><select id="identityPlatform"><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option></select></label>
+    <label class="compact-field grow"><span>平台账号 ID</span><input id="identityUserId" type="text" placeholder="抖音号 / 小红书号（稳定 ID）" required></label>
+    <label class="compact-field grow"><span>平台显示名</span><input id="identityUserName" type="text" placeholder="用于 @ 候选项展示，可选"></label>
+    <label class="compact-field grow"><span>微信成员</span><select id="identityMemberSelect"><option value="">从成员列表选择…</option></select></label>
+    <label class="compact-field"><span>wxid / member_id</span><input id="identityMemberId" type="text" placeholder="稳定 member_id" required></label>
+    <label class="compact-field"><span>成员显示名</span><input id="identityMemberName" type="text" placeholder="可选"></label>
+    <button class="btn small" type="submit" id="identityBindBtn">{{ icon('link', 13) }}绑定</button>
+  </form>
+  <p class="platform-form-hint" id="identityHint">选择微信成员会自动填入 wxid；也可以直接手填。重新绑定同一平台账号会覆盖旧关联。</p>
+  <div class="table-wrap"><table class="data-table" id="identityTable"><thead><tr><th>平台</th><th>平台账号 ID</th><th>平台显示名</th><th>微信成员</th><th>操作</th></tr></thead><tbody>{% for row in platform_identities %}<tr><td><span class="chip accent">{{ row.platform_label }}</span></td><td><code class="platform-code">{{ row.platform_user_id }}</code></td><td>{{ row.platform_user_name or '—' }}</td><td>{{ row.member_name or '—' }}<small class="table-subtext">{{ row.member_id or '—' }}</small></td><td><button class="btn ghost small" type="button" data-identity-delete="{{ row.id }}">解绑</button></td></tr>{% else %}<tr><td colspan="5"><div class="empty-inline">{% if identities_available %}还没有绑定记录。先在表格上方绑定一个平台账号。{% else %}关联接口尚未就绪，后端合并后这里会自动显示。{% endif %}</div></td></tr>{% endfor %}</tbody></table></div>
+</section>
+
+<section class="card data-card platform-section" id="platformBrowse">
+  <div class="data-card-head"><div><h2>浏览与评论</h2><p>先读公开内容，再决定是否生成评论计划；浏览本身不写平台。</p></div><span class="soft-badge" id="browseState">dry-run 浏览 · 不写平台</span></div>
+  <div class="browse-toolbar">
+    <label class="compact-field"><span>平台</span><select id="browsePlatform"><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option></select></label>
+    <label class="compact-field grow"><span>关键词</span><input id="browseQuery" type="text" placeholder="例如：看海 攻略" autocomplete="off"></label>
+    <label class="compact-field"><span>条数</span><input id="browseLimit" type="number" min="1" max="20" step="1" value="5"></label>
+    <button class="btn small" type="button" id="browseBtn">{{ icon('search', 13) }}浏览</button>
+  </div>
+  <div class="browse-results" id="browseResults"><div class="empty-inline">输入关键词后浏览平台公开内容；打开浏览器并确认登录后结果更完整。</div></div>
+</section>
+
+<section class="card data-card platform-section" id="platformActions">
+  <div class="data-card-head"><div><h2>动作台账</h2><p>所有评论 / 回复计划都在这里；真实执行只对「待确认且非 dry-run」的记录开放。</p></div><div class="data-card-head-actions"><span class="soft-badge" id="actionCount">{{ platform_actions|length }} 条</span><button class="btn ghost small" type="button" id="refreshActions">{{ icon('refresh', 13) }}刷新</button></div></div>
+  <div class="table-wrap"><table class="data-table" id="actionTable"><thead><tr><th>动作 / 平台</th><th>目标</th><th>文本</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>{% for row in platform_actions %}<tr data-action-key="{{ row.action_key }}"><td>{{ row.action_label }}<small class="table-subtext">{{ row.platform_label }}</small></td><td><code class="platform-code">{{ row.target_id or '—' }}</code>{% if row.target_url %}<small class="table-subtext">{{ row.target_url }}</small>{% endif %}</td><td>{{ row.text }}{% if row.reason %}<small class="table-subtext">{{ row.reason }}</small>{% endif %}</td><td><span class="chip {{ row.status_kind }}">{{ row.status_label }}</span>{% if row.dry_run %}<small class="table-subtext">dry-run · 不会真实发送</small>{% endif %}</td><td>{{ row.time_text or '—' }}</td><td>{% if row.can_execute %}<button class="btn small" type="button" data-execute-action="{{ row.action_key }}">确认执行</button>{% else %}<span class="muted">—</span>{% endif %}</td></tr>{% else %}<tr><td colspan="6"><div class="empty-inline">{% if actions_available %}还没有平台动作记录。在「浏览与评论」里生成一条计划后会出现。{% else %}动作台账接口尚未就绪。{% endif %}</div></td></tr>{% endfor %}</tbody></table></div>
+</section>
+
+<section class="card data-card platform-section" id="platformMemory">
+  <div class="data-card-head"><div><h2>平台记忆（三号共享）</h2><p>平台浏览、看到的评论和发出的评论按成员 + 平台归档，回复时可跨群读取。</p></div><span class="soft-badge" id="memoryCount">{{ platform_memory_total }} 条</span></div>
+  <form class="browse-toolbar" id="memoryFilter" autocomplete="off">
+    <label class="compact-field grow"><span>成员过滤</span><input id="memoryMemberId" type="text" placeholder="member_id / wxid，留空看全部" value="{{ memory_filter.member_id }}"></label>
+    <label class="compact-field"><span>平台</span><select id="memoryPlatform"><option value="">全部平台</option><option value="douyin"{% if memory_filter.platform == 'douyin' %} selected{% endif %}>抖音</option><option value="xiaohongshu"{% if memory_filter.platform == 'xiaohongshu' %} selected{% endif %}>小红书</option></select></label>
+    <button class="btn small" type="submit">{{ icon('search', 13) }}筛选</button>
+    <button class="btn ghost small" type="button" id="refreshMemories">{{ icon('refresh', 13) }}刷新</button>
+  </form>
+  <div class="memory-groups" id="memoryList">{% for group in platform_memory_groups %}<div class="memory-group"><div class="memory-group-head"><span class="person-avatar">{{ group.member_name[:1] }}</span><div><strong>{{ group.member_name }}</strong><small>{{ group.member_id or '未关联成员' }}</small></div><span class="chip accent">{{ group.platform_label }}</span></div>{% for row in group.rows %}<div class="memory-row"><span class="chip {{ row.kind_kind }}">{{ row.kind_label }}</span><div><p>{{ row.title or row.item_id or '—' }}</p>{% if row.text and row.text != row.title %}<small class="memory-snippet">{{ row.text }}</small>{% endif %}<small>{% if row.query %}关键词：{{ row.query }} · {% endif %}{% if row.url %}<a href="{{ row.url }}" target="_blank" rel="noopener noreferrer" class="text-link">{{ row.url }}</a> · {% endif %}{{ row.time_text or '' }}</small></div></div>{% endfor %}</div>{% else %}<div class="empty-inline">{% if memories_available %}还没有平台记忆记录。{% else %}平台记忆接口尚未就绪，后端合并后这里会自动显示。{% endif %}</div>{% endfor %}</div>
+</section>
+
+<section class="card platform-proactive" id="platformProactive">
+  <div class="data-card-head"><div><h2>主动浏览</h2><p>后台按间隔跑一轮平台浏览并生成 dry-run 评论计划；静默时段不主动执行。</p></div><div class="data-card-head-actions">{% if platform_proactive.available %}<button class="btn small" type="button" id="runProactive">{{ icon('play', 13) }}立即跑一轮</button>{% else %}<button class="btn small" type="button" id="runProactive" disabled title="后端接口尚未就绪">立即跑一轮</button>{% endif %}</div></div>
+  <div class="proactive-facts">
+    <div><span>开关</span><strong id="proactiveEnabled">{{ platform_proactive.enabled_text }}</strong></div>
+    <div><span>间隔</span><strong id="proactiveInterval">{{ platform_proactive.interval_text }}</strong></div>
+    <div><span>静默时段</span><strong id="proactiveQuiet">{{ platform_proactive.quiet_hours }}</strong></div>
+    <div><span>上次运行</span><strong id="proactiveLastRun">{{ platform_proactive.last_run_text }}</strong></div>
+  </div>
+  <div class="proactive-detail"><span class="card-kicker">关键词</span><p id="proactiveKeywords">{{ platform_proactive.keywords_text }}</p></div>
+  {% if platform_proactive.last_result_text %}<div class="proactive-detail"><span class="card-kicker">最近结果</span><p>{{ platform_proactive.last_result_text }}</p></div>{% endif %}
+  <div class="proactive-detail"><span class="card-kicker">最近记录</span><div id="proactiveRecent">{% for row in platform_proactive.recent %}<div class="memory-row"><span class="chip">记录</span><div><p>{{ row.text }}</p><small>{{ row.time_text }}</small></div></div>{% else %}<p class="muted">还没有运行记录。</p>{% endfor %}</div></div>
+  <p class="platform-form-hint">开关、间隔、关键词与静默时段在 <a class="text-link" href="{{ platform_settings_url }}">设置 → 平台</a> 修改；这里只读并允许测试跑一轮。</p>
+</section>
+
+<noscript><div class="notice"><span>绑定、浏览、评论计划与台账确认需要启用 JavaScript；当前页面已渲染服务端数据。</span></div></noscript>
+{% endblock %}
+{% block scripts %}<script src="/static/platform.js"></script>{% endblock %}

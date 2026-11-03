@@ -1,0 +1,58 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+!.env.linux.example
+
+# Python environments and caches
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Deployment kit output: contains a copy of .env for the VM transfer
+deploy/out/
+
+# Node dependencies for the DSH plugin checkout install (npm install --omit=peer)
+node_modules/
+.pnpm-store/
+.npmpkg-cache/
+
+# Acceptance tests are part of this Linux deliverable.
+
+# Runtime state, databases, logs, and debug output
+state/
+runtime/
+data/
+logs/
+*.log
+*.out
+*.db
+*.sqlite
+*.sqlite3
+@AutomationLog.txt
+
+# Test scratch output
+pytest-of-*/
+.pytools/
+tmp*/
+
+# Browser login/session data and screenshots
+.playwright/
+.playwright-mcp/
+playwright/.auth/
+browser-data/
+cookies/
+screenshots/
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

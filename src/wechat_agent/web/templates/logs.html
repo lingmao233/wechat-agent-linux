@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}日志{% endblock %}
+{% block heading %}日志{% endblock %}
+{% block subtitle %}实时活动、回复结果与发送审计，只在需要时展开。{% endblock %}
+{% block header_actions %}<span class="connection ok" id="liveState"><i></i><span>每 2 秒刷新</span></span>{% endblock %}
+{% block content %}
+<section class="metric-grid log-metrics" aria-label="日志统计">
+  <article class="metric-card"><div class="metric-icon green">{{ icon('send') }}</div><div><span>已发送</span><strong>{{ statuses.get('sent', 0) }}</strong><small>账本确认成功</small></div></article>
+  <article class="metric-card"><div class="metric-icon blue">{{ icon('logs') }}</div><div><span>已跳过</span><strong>{{ statuses.get('skipped', 0) }}</strong><small>规则判定不回复</small></div></article>
+  <article class="metric-card"><div class="metric-icon amber">{{ icon('event') }}</div><div><span>发送失败</span><strong>{{ statuses.get('failed', 0) }}</strong><small>失败原因保留在账本</small></div></article>
+  <article class="metric-card"><div class="metric-icon violet">{{ icon('refresh') }}</div><div><span>处理中</span><strong>{{ statuses.get('processing', 0) }}</strong><small>正在生成或投递</small></div></article>
+</section>
+<nav class="workspace-tabs log-tabs" aria-label="日志视图"><button class="active" type="button" data-log-tab="activity">{{ icon('logs', 16) }}实时活动</button><button type="button" data-log-tab="replies">{{ icon('send', 16) }}回复账本</button><button type="button" data-log-tab="audits">{{ icon('shield', 16) }}发送审计</button>{% if platform_actions %}<button type="button" data-log-tab="platforms">平台动作</button>{% endif %}</nav>
+
+<section class="card data-card log-panel" data-log-panel="activity"><div class="data-card-head"><div><h2>实时活动</h2><p>本次运行最近 60 条记录。</p></div><span class="live-label"><i></i>LIVE</span></div><div class="event-feed" id="logEvents">{% for row in events %}<div class="event-row"><span class="event-dot {{ row.level|lower }}"></span><div><div class="event-meta"><span>{{ row.source }} · {{ row.level }}</span><time>{{ row.at_text }}</time></div><p>{{ row.message }}</p></div></div>{% else %}<div class="empty-inline">暂无实时记录。</div>{% endfor %}</div></section>
+
+<section class="card data-card log-panel" data-log-panel="replies"><div class="data-card-head"><div><h2>回复账本</h2><p>每条消息的去向、原因与尝试次数。</p></div><span class="soft-badge">最近 100 条</span></div><div class="table-wrap tall"><table class="data-table" id="ledgerReplies"><thead><tr><th>时间 / 成员</th><th>状态 / 原因</th><th>收到的消息</th><th>发出的回复</th><th>尝试</th></tr></thead><tbody>{% for row in replies %}<tr><td>{{ row.at_text }}<small class="table-subtext">{{ row.member_name }} · {{ row.group_name }}</small></td><td><span class="chip{% if row.status == 'sent' %} green{% elif row.status == 'failed' %} red{% endif %}">{{ row.status_label }}</span><small class="table-subtext">{{ row.reason }}{% if row.basis %} · {{ row.basis }}{% endif %}</small></td><td>{{ row.text }}</td><td>{{ row.reply_text or '—' }}</td><td>{{ row.attempts }}</td></tr>{% else %}<tr><td colspan="5"><div class="empty-inline">还没有回复记录。</div></td></tr>{% endfor %}</tbody></table></div></section>
+
+<section class="card data-card log-panel" data-log-panel="audits"><div class="data-card-head"><div><h2>发送审计</h2><p>真正投递前的策略检查与拦截原因。</p></div><span class="soft-badge">最近 100 条</span></div><div class="table-wrap tall"><table class="data-table" id="ledgerAudits"><thead><tr><th>时间</th><th>动作</th><th>会话 / 成员</th><th>结果</th><th>内容</th></tr></thead><tbody>{% for row in audits %}<tr><td>{{ row.at_text }}</td><td>{{ row.action_type }}</td><td>{{ row.group_id }}<small class="table-subtext">{{ row.member_id }}</small></td><td><span class="chip{% if row.allowed %} green{% else %} red{% endif %}">{{ row.result_label }}</span><small class="table-subtext">{{ row.reason }}</small></td><td>{{ row.text }}</td></tr>{% else %}<tr><td colspan="5"><div class="empty-inline">还没有发送审计记录。</div></td></tr>{% endfor %}</tbody></table></div></section>
+
+{% if platform_actions %}<section class="card data-card log-panel" data-log-panel="platforms"><div class="data-card-head"><div><h2>平台动作</h2><p>抖音与小红书工具记录。</p></div></div><div class="table-wrap tall"><table class="data-table"><thead><tr><th>动作</th><th>平台</th><th>状态</th><th>内容</th></tr></thead><tbody>{% for row in platform_actions %}<tr><td>{{ row.action_type }}</td><td>{{ row.platform }}</td><td>{{ row.status }}</td><td>{{ row.text }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
+{% endblock %}
+{% block scripts %}<script src="/static/logs.js"></script>{% endblock %}
