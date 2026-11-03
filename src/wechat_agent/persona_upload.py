@@ -47,6 +47,13 @@ TEXT_EXTENSIONS: tuple[str, ...] = (
 )
 #: Preferred main file names, checked in order.
 MAIN_FILE_CANDIDATES: tuple[str, ...] = ("SKILL.md",)
+#: Loose style files uploaded at the bundle root are moved into the canonical
+#: directory the runtime reads.  Missing files are never created: no style
+#: file means no injected voice/appearance (never a bundled fallback).
+STYLE_FILE_PATHS: dict[str, str] = {
+    "speech-style.md": "references/speech-style.md",
+    "image-style.md": "references/image-style.md",
+}
 DEFAULT_PERSONA_ROOT = Path("personas")
 #: Files listed per persona by the catalog endpoint (keeps JSON bounded).
 MAX_LISTED_FILES = 500
@@ -327,6 +334,35 @@ def _validate_files(value: object) -> list[tuple[str, str]]:
     return normalized
 
 
+def _canonicalize_style_paths(files: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Move loose root-level style files into ``references/``.
+
+    The runtime only looks at ``references/speech-style.md`` and
+    ``references/image-style.md``.  Accepting a loose ``image-style.md`` at
+    the bundle root makes the existing upload UI forgiving without inventing
+    a style when the user did not provide one.
+    """
+
+    normalized: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for path, content in files:
+        parts = path.split("/")
+        canonical = path
+        if len(parts) == 1 and parts[0].casefold() in STYLE_FILE_PATHS:
+            canonical = STYLE_FILE_PATHS[parts[0].casefold()]
+        elif (
+            len(parts) == 2
+            and parts[0].casefold() == "references"
+            and parts[1].casefold() in STYLE_FILE_PATHS
+        ):
+            canonical = STYLE_FILE_PATHS[parts[1].casefold()]
+        if canonical in seen:
+            raise ValueError(f"风格文件重复：{canonical}")
+        seen.add(canonical)
+        normalized.append((canonical, content))
+    return normalized
+
+
 def _as_bool(value: object, default: bool, label: str) -> bool:
     if value is None:
         return default
@@ -422,7 +458,7 @@ def upload_persona(
     if not isinstance(payload, dict):
         raise ValueError("请求体必须是 JSON 对象")
     name = _validate_name(payload.get("name"))
-    files = _validate_files(payload.get("files"))
+    files = _canonicalize_style_paths(_validate_files(payload.get("files")))
     overwrite = _as_bool(payload.get("overwrite"), False, "overwrite")
     apply = _as_bool(payload.get("apply"), True, "apply")
     if apply and controller is None:

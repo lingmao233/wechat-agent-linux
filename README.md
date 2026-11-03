@@ -144,6 +144,6 @@ ${WECHAT_PYTHON:-.venv/bin/python} scripts/accept-linux.py \
 - [FR / AC 验收映射与证据](docs/ACCEPTANCE.md)
 - [Linux PRD](docs/PRD-LINUX.md) / [记忆与情绪 PRD](docs/PRD-MEMORY-CONTEXT-EMOTION.md)
 
-给非技术用户的最短路径：在 DSH 里打开任意会话 → 顶部「Attune」标签页 →「部署」→ 点「一键连接」打开 DSH 风格操作弹窗 → 在弹窗里复制命令到虚拟机终端运行（自动装好 SSH 并打印连接码）→ 把连接码粘回弹窗、输入开机密码 →「一键连接」→「一键部署」，详见 [DSH 插件说明](docs/DSH-PLUGIN.md)。虚拟机里还没装 Ubuntu 也能从零开始：VMware Workstation 安装包（夸克网盘）、Xubuntu / Ubuntu Desktop 24.04 LTS 官方链接和「怎么打开终端」都写在 [部署文档 2.0 / 2.2 节](docs/DEPLOY-XUBUNTU-VM.md)，操作弹窗第 1 步底部也内置了同一份教程。如果插件设置里已经连过这台虚拟机，部署页会直接显示「已连接」而不再要你填一遍；要做检测、部署或更新时点第 1 步「用部署页接管」（默认沿用本机 SSH 密钥），断开后连接自动交还给插件设置。模型 Key 和回复群在「设置」子页：第一组就是「模型」（文字模型地址 / Key / 模型），同一页可直接把写好的角色设定（`.md` 或整个文件夹）拖进「人设文件上传」上传到虚拟机 `personas/`，勾选「上传后设为当前人设」即可切换。
+给非技术用户的最短路径：在 DSH 里打开任意会话 → 顶部「Attune」标签页 →「部署」→ 点「一键连接」打开 DSH 风格操作弹窗 → 在弹窗里复制命令到虚拟机终端运行（自动装好 SSH 并打印连接码）→ 把连接码粘回弹窗、输入开机密码 →「一键连接」→「一键部署」，详见 [DSH 插件说明](docs/DSH-PLUGIN.md)。虚拟机里还没装 Ubuntu 也能从零开始：VMware Workstation 安装包（夸克网盘）、Xubuntu / Ubuntu Desktop 24.04 LTS 官方链接和「怎么打开终端」都写在 [部署文档 2.0 / 2.2 节](docs/DEPLOY-XUBUNTU-VM.md)，操作弹窗第 1 步底部也内置了同一份教程。如果插件设置里已经连过这台虚拟机，部署页会直接显示「已连接」而不再要你填一遍；要做检测、部署或更新时点第 1 步「用部署页接管」（默认沿用本机 SSH 密钥），断开后连接自动交还给插件设置。模型 Key 和回复群在「设置」子页：第一组就是「模型」（文字模型地址 / Key / 模型），同一页可直接把写好的角色设定（`.md` 或整个文件夹）拖进「人设文件上传」上传到虚拟机 `personas/`，勾选「上传后设为当前人设」即可切换；也可以用「人设设计」输入文字描述，选择是否生成说话风格和生图外观，由模型生成 `SKILL.md` 和可选的 `references/speech-style.md`、`references/image-style.md`，预览修改后再上传，不会继承当前角色的语气或外观。
 
 原 Windows 文档和适配器保留在仓库中；Linux 部署以本页及 `DEPLOYMENT-LINUX.md` 为入口。

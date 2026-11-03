@@ -30,6 +30,7 @@ from .platform_identity import PlatformIdentityService
 from .platform_memory import PlatformMemoryService
 from .storage import Storage
 from .console_memory import MemoryConsole, config_fields
+from .persona_designer import generate_persona_design
 from .persona_upload import list_personas, upload_persona
 from .voice_studio import VoiceProfileError, VoiceProfiles
 from .web import STATIC_DIR, WebConsole
@@ -392,6 +393,15 @@ class DesktopController:
             "values": values,
             "configured_secrets": secrets,
         }
+
+    def design_persona(self, payload: dict[str, object]) -> dict[str, object]:
+        """Generate a persona bundle from the console's text description."""
+
+        if not self.settings.llm_api_key.strip():
+            raise ValueError("请先在「模型」里配置文字模型 Key，再让模型生成人设")
+        from .llm import LLMClient
+
+        return generate_persona_design(LLMClient(self.settings), payload)
 
     def save_config(self, payload: dict[str, object]) -> dict[str, object]:
         raw_values = payload.get("values")
@@ -898,6 +908,8 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/config":
                 payload = self.server.controller.save_config(body)
                 self.server.token = self.server.controller.settings.desktop_token.strip()
+            elif path == "/api/personas/design":
+                payload = self.server.controller.design_persona(body)
             elif path == "/api/personas/upload":
                 payload = upload_persona(
                     self.server.controller.settings,
