@@ -13,7 +13,7 @@ from .config import Settings
 from .image_codec import ensure_viewable_image
 from .models import ConversationMessage, MemoryFact, MessageEvent, QuotedMessage
 from .reply_context import image_quote
-from .textnorm import normalize_chat_text
+from .textnorm import display_sender, normalize_chat_text
 from .persona import Persona, load_persona
 from .persona_style import TONE_LEXICON, ToneWordRotator, sanitize_persona_reply
 from .reaction_images import ReactionImagePlan
@@ -137,6 +137,7 @@ class LLMClient:
         allow_reaction_image: bool = False,
         reaction_image_catalog: list[dict] | None = None,
         proactive_idle: bool = False,
+        addressee: dict | None = None,
         allow_voice_reply: bool = False,
         followup_to: MessageEvent | None = None,
         reply_delivery: str = "",
@@ -293,6 +294,8 @@ class LLMClient:
             system += (
                 "\n\n<proactive_instruction>\n"
                 "这次没有人点名叫你，是你自主想聊两句；正常讨论中也可随机参与，不需要等到冷场。"
+                "先说清楚这条消息在跟谁说话：如果群里两个人正在互相聊、对方并没有在说你，"
+                "不要把它当成对自己的提问、指责或要求，不要接成“我怎么了/我又惹你了”。"
                 "可以自然接一句、分享相关的小想法、接梗、安慰朋友，或用一张图表达心情。"
                 "结合上下文和自己的心情组织回复；本轮已安排语音或配图时使用该形式，内容仍由你决定。"
                 "不要重复别人，不要每一条都接，也不要把社交关键词当作必须出现的前提。"
@@ -308,6 +311,29 @@ class LLMClient:
                 "不要固定复读招呼或催人回应，不要求别人陪聊，不用失落或指责制造负担。"
                 "具体说什么、是否配图由你判断；没有想说的就输出 [不回复]。\n"
                 "</proactive_idle_instruction>"
+            )
+        if str((addressee or {}).get("mode") or "") == "bystander":
+            target = str((addressee or {}).get("target") or "").strip()
+            system += (
+                "\n\n<addressee_note>\n"
+                "这条消息不是在对你说"
+                + (f"，大概率是在跟「{target}」说话" if target else "，是在跟群里其他真人说话")
+                + "。不要用第二人称把它当成对你的提问、要求或指责；"
+                "不要回“我怎么了”“我又没惹你”这类话。"
+                "你要接就作为群里旁观的人自然接一句，不要抢戏；觉得没必要就输出 [不回复]。\n"
+                "</addressee_note>"
+            )
+        if not proactive_idle:
+            # Phone input produces homophone typos constantly.  Telling the
+            # model once, in a bounded block, is cheaper and safer than
+            # guessing a repair table: it can still refuse to invent facts.
+            system += (
+                "\n\n<chat_input_guidance>\n"
+                "群聊内容来自手机拼音输入，经常出现同音字或错别字："
+                "“飞鱼”可能其实是“肥鱼”，“小宇”“晓雨”可能其实是“小鱼”。"
+                "遇到语义不通、人名对不上或话题突兀时，先按最可能的同音词或近音词理解；"
+                "不要把同音错字当成新人物、新词或别人对你的新称呼，也不要在回复里纠正别人的错字。\n"
+                "</chat_input_guidance>"
             )
         if self.persona:
             style_parts = []
@@ -444,6 +470,7 @@ class LLMClient:
                             "content": item.text,
                             "imageCount": len(item.image_paths or []),
                             "sentAt": stamp(item.observed_at, timezone_name=self.settings.group_timezone),
+                            **self._reply_to_payload(item),
                         }
                         for item in context_messages
                     ],
@@ -459,7 +486,7 @@ class LLMClient:
             if reply_to:
                 blocks.append(self._json_block("wechat_reply_to", quote_payload))
             blocks.append(self._json_block("memory_snapshot", {"source": source_context, "snapshot": memory_context.get("snapshot"), "retrieval_status": memory_context.get("retrieval_status"), "profile_version": memory_context.get("profile_version")}))
-            blocks.append(self._json_block("wechat_context", [{"senderId": item.sender_id, "senderName": item.sender_name, "messageId": item.message_id, "content": item.text, "sourceRole": item.source_role, "sentAt": stamp(item.observed_at, timezone_name=self.settings.group_timezone)} for item in context_messages or []]))
+            blocks.append(self._json_block("wechat_context", [{"senderId": item.sender_id, "senderName": item.sender_name, "messageId": item.message_id, "content": item.text, "sourceRole": item.source_role, "sentAt": stamp(item.observed_at, timezone_name=self.settings.group_timezone), **self._reply_to_payload(item)} for item in context_messages or []]))
             blocks.append(self._json_block("verified_history", memory_context.get("historical_evidence", [])))
             blocks.append(self._json_block("relevant_profiles", memory_context.get("related_profiles", {})))
             blocks.append(self._json_block("emotion_relationship", emotion_context))
@@ -619,6 +646,24 @@ class LLMClient:
             response.raise_for_status()
             data = response.json()
         return str(data["choices"][0]["message"]["content"] or "").strip()
+
+    @staticmethod
+    def _reply_to_payload(item: ConversationMessage) -> dict[str, object]:
+        """Return the ``replyTo`` fragment for one context message, if any.
+
+        Seeing "who replied to whom" is what stops the model from treating two
+        friends' exchange as an attack on itself.
+        """
+
+        text = str(item.reply_to_text or "").strip()
+        if not text:
+            return {}
+        payload: dict[str, object] = {}
+        sender = display_sender(item.reply_to_sender)
+        if sender:
+            payload["senderName"] = sender
+        payload["content"] = text[:120]
+        return {"replyTo": payload}
 
     @staticmethod
     def _json_block(tag: str, value: object) -> str:

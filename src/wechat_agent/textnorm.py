@@ -310,3 +310,18 @@ def is_self_referential_value(value: str) -> bool:
     """True when an extracted preference is about the listener, not the member."""
 
     return _collapse(value).strip(" ，,。.!！？?；;:：") in _SELF_REFERENTIAL_VALUES
+
+
+# Stored quote senders are sometimes a wxid or the chatroom id rather than a
+# display name.  Those identifiers carry no meaning for the model and would
+# only invite it to treat an id as a person.
+_ID_LIKE_SENDER = re.compile(r"^(?:wxid_[0-9A-Za-z_\-]+|[0-9A-Za-z_\-]{18,})$")
+
+
+def display_sender(value: object) -> str:
+    """Return a human label for a quoted sender, or "" when it is only an id."""
+
+    text = str(value or "").strip()
+    if not text or text.endswith("@chatroom") or _ID_LIKE_SENDER.match(text):
+        return ""
+    return text[:40]

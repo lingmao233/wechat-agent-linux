@@ -17,6 +17,7 @@ VISIBLE_SETTINGS: dict[str, tuple[str, ...]] = {
     "回复偏好": (
         "WECHAT_PROACTIVE_REPLY",
         "WECHAT_PROACTIVE_PROBABILITY",
+        "ADDRESSEE_GATE_ENABLED",
         "REACTION_IMAGES_ENABLED",
         "REACTION_IMAGE_PROBABILITY",
         "VOICE_REPLY_ENABLED",

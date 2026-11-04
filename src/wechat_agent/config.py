@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     proactive_idle_after_minutes: int = Field(default=30, ge=5, le=1440)
     proactive_idle_probability: float = Field(default=0.4, ge=0, le=1)
     proactive_idle_max_per_day: int = Field(default=2, ge=0, le=20)
+    # A proactive candidate or a bare keyword hit is only a guess about who is
+    # being addressed.  Before answering one, ask the model whether the message
+    # targets the character at all.  Fail-open: errors count as "unclear".
+    addressee_gate_enabled: bool = True
+    addressee_judge_timeout_seconds: float = Field(default=8, gt=0, le=30)
     wechat_exe: str | None = None
     # ``WECHAT_GROUP_NAMES`` is the multi-group setting.  The singular field
     # remains as a compatibility input for existing .env files and is kept in

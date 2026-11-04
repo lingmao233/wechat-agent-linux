@@ -40,6 +40,11 @@ class ConversationMessage:
     image_paths: list[str] = field(default_factory=list)
 
     source_role: str = "human"
+    # Who this message was replying to.  A reply chain is the cheapest signal
+    # that two friends are talking to each other rather than to the character,
+    # so the context block carries it into the prompt.
+    reply_to_sender: str = ""
+    reply_to_text: str = ""
 
 
 @dataclass(slots=True)

@@ -82,6 +82,8 @@ def config_fields() -> list[dict]:
             "proactive_idle_after_minutes": "安静多久后可开话题（分钟）",
             "proactive_idle_probability": "空闲窗口开话题概率",
             "proactive_idle_max_per_day": "每天最多冷场开话题次数",
+            "addressee_gate_enabled": "回复前判断在跟谁说话",
+            "addressee_judge_timeout_seconds": "判断消息对象超时（秒）",
         },
     }
     result = []
@@ -136,6 +138,14 @@ def config_fields() -> list[dict]:
                 item["description"] = "同时开启随机与计划参与时，共用已发送记录并采用较小的小时上限；0 暂停主动发言。"
             if key == "proactive_quiet_hours":
                 item["description"] = "随机接话与计划参与共用此时段；开始和结束相同表示关闭安静时段。"
+            if key == "addressee_gate_enabled":
+                item["description"] = (
+                    "主动插话和关键词命中前，先让模型判断这条消息是在跟谁说话；"
+                    "判定在回其他真人时不回复，判定不确定时只作为旁观者接话，不认领成对自己的指责。"
+                    "明确叫到机器人名字、@ 或引用机器人时仍正常回复，不走此判断。"
+                )
+            if key == "addressee_judge_timeout_seconds":
+                item["description"] = "判断消息对象的最长等待时间；超时按“不确定”处理，不会卡住回复。"
             result.append(item)
     return result
 

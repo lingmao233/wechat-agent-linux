@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass, replace
 
 from .config import Settings
+from .addressee import judge_addressee, opens_with_bot_name, reply_mode
 from .image import ImageClient
 from .image_context import select_image_paths
 from .llm import LLMClient
@@ -763,6 +764,93 @@ class WeChatAgent:
                     memory_context = {}
                 memory_context["member_address"] = preferred_address
         conversation_type = getattr(event, "conversation_type", "") or str(event.media_metadata.get("conversation_type") or "group")
+
+        # Answering a guessed target is the usual way the character talks over
+        # two friends.  A proactive candidate and a bare keyword hit are both
+        # guesses, so ask the model who the message is actually addressing
+        # before spending a full reply on it.
+        addressee_mode = ""
+        addressee_target = ""
+        proactive_idle_mode = bool(
+            proactive
+            and event.source == "proactive_scheduler"
+            and event.media_metadata.get("proactive_mode") == "idle"
+        )
+        gate_basis = ""
+        if proactive and not proactive_idle_mode:
+            gate_basis = "proactive"
+        elif decision.basis == "keyword":
+            gate_basis = "keyword"
+        if (
+            gate_basis
+            and not voice_clarification
+            and not is_image_request
+            and conversation_type == "group"
+            and event.message_type != "voice"
+            and self.settings.addressee_gate_enabled
+        ):
+            own_names = tuple(
+                dict.fromkeys(
+                    name
+                    for name in (
+                        *self.settings.wechat_ai_aliases,
+                        self.settings.wechat_self_name,
+                        self.settings.persona_name,
+                    )
+                    if str(name or "").strip()
+                )
+            )
+            member_names = tuple(
+                dict.fromkeys(
+                    item.sender_name for item in context_messages if item.sender_name
+                )
+            )
+            verdict = judge_addressee(
+                self.llm,
+                text=analysis_text or event.text,
+                sender=event.member_name,
+                context=context_messages,
+                bot_names=own_names,
+                member_names=member_names,
+                timeout_seconds=self.settings.addressee_judge_timeout_seconds,
+            )
+            addressee_mode = reply_mode(verdict, proactive=proactive)
+            matched_trigger = str(decision.rules.get("matched") or "").strip()
+            if (
+                gate_basis == "keyword"
+                and addressee_mode == "skip"
+                and matched_trigger
+                and opens_with_bot_name(normalized_event.text, (matched_trigger,))
+            ):
+                # A message that opens by calling the character by name is
+                # addressed to it even if the rest mentions someone else.
+                addressee_mode = "reply"
+            addressee_target = verdict.target
+            decision.rules["addressee"] = {**verdict.as_dict(), "mode": addressee_mode}
+            log.info(
+                "addressee verdict group=%s member=%s basis=%s addressed=%s reply_to_human=%s target=%s mode=%s source=%s reason=%s",
+                event.group_id,
+                event.member_name,
+                gate_basis,
+                verdict.addressed_to_ai,
+                verdict.reply_to_human,
+                verdict.target or "-",
+                addressee_mode,
+                verdict.source,
+                verdict.reason or "-",
+            )
+            if addressee_mode == "skip":
+                if event.proactive_window_id:
+                    self.scheduler.release(event.proactive_window_id, reason="addressee_other_member")
+                finish("skipped", "addressee_other_member")
+                self.stats.skipped += 1
+                log.info("message skipped member=%s reason=addressee_other_member", event.member_name)
+                return False
+        addressee_note = (
+            {"mode": addressee_mode, "target": addressee_target}
+            if addressee_mode == "bystander"
+            else None
+        )
         source_context = {
             "channel": "weixin",
             "conversationType": conversation_type,
@@ -818,6 +906,7 @@ class WeChatAgent:
                         proactive=proactive,
                         memory_context=memory_context,
                         followup_to=followup_to,
+                        addressee=addressee_note,
                     )
                 else:
                     reply = self._reply_with_context(
@@ -830,6 +919,7 @@ class WeChatAgent:
                         proactive=proactive,
                         memory_context=memory_context,
                         followup_to=followup_to,
+                        addressee=addressee_note,
                     )
                 reply_text = reply.text
                 if proactive and str(reply_text or "").strip().strip("[] ") == "不回复":
@@ -1029,6 +1119,7 @@ class WeChatAgent:
         proactive: bool = False,
         memory_context: dict | None = None,
         followup_to: MessageEvent | None = None,
+        addressee: dict | None = None,
     ):
         """Call the richer prompt contract while keeping small test doubles compatible."""
 
@@ -1106,6 +1197,7 @@ class WeChatAgent:
                 proactive_idle=bool(proactive and event.source == "proactive_scheduler" and event.media_metadata.get("proactive_mode") == "idle"),
                 allow_voice_reply=allow_voice_reply,
                 reply_delivery=reply_delivery,
+                addressee=addressee,
             )
             delivery = ("voice" if getattr(result, "voice_reply", False) else
                         "image" if getattr(result, "image_only", False) else

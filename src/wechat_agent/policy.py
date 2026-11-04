@@ -11,6 +11,7 @@ import unicodedata
 from zoneinfo import ZoneInfo
 
 from .config import Settings
+from . import homophones
 from .models import MessageEvent, OutboundAction
 from .social import proactive_affinity_weight
 from .storage import Storage
@@ -262,10 +263,33 @@ class ActionPolicy:
             if folded.startswith(alias.casefold()):
                 return "ai_mentioned", alias
 
+        # Phone pinyin input turns a nickname into a homophone easily
+        # (小鱼 -> 小宇, 肥鱼 -> 飞鱼).  Accept a same-sounding alias only when
+        # it opens the message or stands alone: inside ordinary prose the same
+        # syllables are usually a real member's name, not a summons.
+        for raw_alias in aliases:
+            alias = self._normalize_trigger_text(raw_alias)
+            if len(alias) < 2 or not homophones.has_cjk(alias):
+                continue
+            for start, end in homophones.find_homophone_spans(value, alias):
+                if start == 0 or homophones.is_standalone(value, start, end):
+                    return "ai_mentioned", alias
+
         for raw_keyword in self.settings.wechat_keywords:
             keyword = self._normalize_trigger_text(raw_keyword)
             if keyword and keyword.casefold() in folded:
                 return "wechat_keyword", keyword
+
+        # Same homophone tolerance for the free-form keyword list.  The exact
+        # match above stays "anywhere"; a mis-typed keyword must open or stand
+        # alone so a passing mention of a similarly sounding name is ignored.
+        for raw_keyword in self.settings.wechat_keywords:
+            keyword = self._normalize_trigger_text(raw_keyword)
+            if len(keyword) < 2 or not homophones.has_cjk(keyword):
+                continue
+            for start, end in homophones.find_homophone_spans(value, keyword):
+                if start == 0 or homophones.is_standalone(value, start, end):
+                    return "wechat_keyword", keyword
         return "", ""
 
     def decision(self, event: MessageEvent) -> ReplyDecision:

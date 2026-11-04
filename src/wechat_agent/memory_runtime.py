@@ -274,7 +274,7 @@ class MemoryRuntime:
                 text = self.storage._row_text(row)
                 if not text or used + len(text) > self.settings.wechat_context_max_chars:
                     continue
-                messages.append(ConversationMessage(sender_name=row.member_name, sender_id=row.member_id, text=text, message_id=row.external_message_id or str(row.id), observed_at=aware(row.source_created_at or row.observed_at), image_paths=json.loads(row.image_paths_json), source_role="assistant" if row.is_self else row.source_role))
+                messages.append(ConversationMessage(sender_name=row.member_name, sender_id=row.member_id, text=text, message_id=row.external_message_id or str(row.id), observed_at=aware(row.source_created_at or row.observed_at), image_paths=json.loads(row.image_paths_json), source_role="assistant" if row.is_self else row.source_role, reply_to_sender=row.reply_to_sender or "", reply_to_text=(row.reply_to_text or "")[:200]))
                 used += len(text)
             return list(reversed(messages))
 

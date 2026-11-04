@@ -2731,6 +2731,8 @@ class Storage:
                     task_id=row.task_id or "",
                     image_paths=_json_list(getattr(row, "image_paths_json", "[]")),
                     source_role="assistant" if row.is_self else row.source_role,
+                    reply_to_sender=getattr(row, "reply_to_sender", "") or "",
+                    reply_to_text=(getattr(row, "reply_to_text", "") or "")[:200],
                 )
             )
             used += len(text)
@@ -2878,6 +2880,8 @@ class Storage:
                     task_id=row.task_id or "",
                     image_paths=_json_list(getattr(row, "image_paths_json", "[]")),
                     source_role="assistant" if row.is_self else row.source_role,
+                    reply_to_sender=getattr(row, "reply_to_sender", "") or "",
+                    reply_to_text=(getattr(row, "reply_to_text", "") or "")[:200],
                 )
             )
             used += len(text)
