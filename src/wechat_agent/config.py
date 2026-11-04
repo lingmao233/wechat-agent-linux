@@ -127,6 +127,13 @@ class Settings(BaseSettings):
     # targets the character at all.  Fail-open: errors count as "unclear".
     addressee_gate_enabled: bool = True
     addressee_judge_timeout_seconds: float = Field(default=8, gt=0, le=30)
+    # A proactive candidate is one row, but people often send a burst of short
+    # messages ("奖励是可以追zls" / "还有俩包苹果干").  The scheduler only picks
+    # the last row; merging the same sender's adjacent rows into one turn stops
+    # the model from answering the final fragment and ignoring what led up to it.
+    proactive_block_enabled: bool = True
+    proactive_block_gap_seconds: float = Field(default=60, ge=10, le=600)
+    proactive_block_max_messages: int = Field(default=3, ge=1, le=5)
     wechat_exe: str | None = None
     # ``WECHAT_GROUP_NAMES`` is the multi-group setting.  The singular field
     # remains as a compatibility input for existing .env files and is kept in

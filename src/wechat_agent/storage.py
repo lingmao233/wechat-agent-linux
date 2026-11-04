@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
     create_engine,
     delete,
     func,
@@ -2798,6 +2799,92 @@ class Storage:
                 thread_id=row.thread_id, task_id=row.task_id,
             )
         return None
+
+    def proactive_speech_block(
+        self,
+        event: MessageEvent,
+        *,
+        gap_seconds: float = 60.0,
+        max_messages: int = 3,
+    ) -> list[ConversationMessage]:
+        """Same-sender rows that precede a proactive candidate as one utterance.
+
+        Only the trigger's own sender is considered, and only text-bearing rows:
+        the model needs the sentence that introduced the fragment, not the
+        member's last picture.  Assistant rows are read too, so the run cannot
+        cross the character's own reply; they are dropped by the selector.  The
+        trigger row itself is excluded because the caller passes it as the
+        current question.
+        """
+
+        from .proactive_block import select_speech_block
+
+        member_id = str(getattr(event, "member_id", "") or "").strip()
+        if not member_id or member_id.casefold() in {"unknown", "未知成员"}:
+            return []
+        try:
+            bounded_gap = max(1.0, min(float(gap_seconds), 600.0))
+            bounded_max = max(1, min(int(max_messages), 5))
+        except (TypeError, ValueError):
+            return []
+        if bounded_max <= 1:
+            return []
+        observed_at = getattr(event, "observed_at", None)
+        if observed_at is None:
+            return []
+        horizon = observed_at - timedelta(seconds=bounded_gap * bounded_max)
+        with self.Session() as session:
+            # The member's own text rows form the block; a stored assistant row
+            # is fetched only so the selector can stop the burst there.
+            statement = select(MessageRow).where(
+                MessageRow.account_id == event.account_id,
+                MessageRow.group_id == event.group_id,
+                MessageRow.lifecycle_status == "active",
+                MessageRow.text_kind != "system",
+                MessageRow.message_hash != self.hash_event(event),
+                MessageRow.observed_at >= horizon,
+                or_(
+                    and_(
+                        MessageRow.member_id == member_id,
+                        MessageRow.message_type.in_(("text", "quote")),
+                    ),
+                    MessageRow.is_self.is_(True),
+                ),
+            )
+            statement = self._before_message(statement, event.ingest_sequence, observed_at)
+            rows = list(
+                session.scalars(
+                    statement.order_by(MessageRow.observed_at.desc(), MessageRow.id.desc()).limit(
+                        bounded_max * 4
+                    )
+                )
+            )
+        messages: list[ConversationMessage] = []
+        for row in rows:
+            text = self._row_text(row).strip()
+            if not text:
+                continue
+            messages.append(
+                ConversationMessage(
+                    sender_name=row.member_name or "unknown",
+                    sender_id=row.member_id or "",
+                    text=text,
+                    observed_at=_aware(row.observed_at),
+                    message_id=row.external_message_id or str(row.id),
+                    thread_id=row.thread_id or "",
+                    task_id=row.task_id or "",
+                    image_paths=_json_list(getattr(row, "image_paths_json", "[]")),
+                    source_role="assistant" if row.is_self else (row.source_role or "human"),
+                    reply_to_sender=getattr(row, "reply_to_sender", "") or "",
+                    reply_to_text=(getattr(row, "reply_to_text", "") or "")[:200],
+                )
+            )
+        return select_speech_block(
+            messages,
+            trigger_at=_aware(observed_at),
+            gap_seconds=bounded_gap,
+            max_messages=bounded_max,
+        )
 
     def related_messages(
         self,

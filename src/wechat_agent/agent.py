@@ -15,7 +15,7 @@ from .addressee import judge_addressee, opens_with_bot_name, reply_mode
 from .image import ImageClient
 from .image_context import select_image_paths
 from .llm import LLMClient
-from .models import MemoryFact, MessageEvent, OutboundAction
+from .models import ConversationMessage, MemoryFact, MessageEvent, OutboundAction
 from .policy import ActionPolicy
 from .profiles import (
     extract_member_profile_patch,
@@ -776,6 +776,37 @@ class WeChatAgent:
             and event.source == "proactive_scheduler"
             and event.media_metadata.get("proactive_mode") == "idle"
         )
+        # People send two or three short messages in a row; the scheduler only
+        # picked the last row.  Merge the same sender's adjacent rows into one
+        # turn so the reply answers the whole burst instead of the last fragment.
+        speech_block: list[ConversationMessage] = []
+        if (
+            proactive
+            and not proactive_idle_mode
+            and conversation_type == "group"
+            and self.settings.proactive_block_enabled
+        ):
+            read_block = getattr(self.storage, "proactive_speech_block", None)
+            if callable(read_block):
+                try:
+                    speech_block = read_block(
+                        event,
+                        gap_seconds=self.settings.proactive_block_gap_seconds,
+                        max_messages=self.settings.proactive_block_max_messages,
+                    ) or []
+                except Exception:  # a context nicety must not block replies
+                    log.debug("proactive speech block unavailable", exc_info=True)
+            if speech_block:
+                decision.rules["speech_block"] = {
+                    "count": len(speech_block),
+                    "message_ids": [item.message_id for item in speech_block],
+                }
+                log.info(
+                    "proactive speech block group=%s member=%s messages=%d",
+                    event.group_id,
+                    event.member_name,
+                    len(speech_block),
+                )
         gate_basis = ""
         if proactive and not proactive_idle_mode:
             gate_basis = "proactive"
@@ -810,6 +841,7 @@ class WeChatAgent:
                 text=analysis_text or event.text,
                 sender=event.member_name,
                 context=context_messages,
+                block_messages=speech_block,
                 bot_names=own_names,
                 member_names=member_names,
                 timeout_seconds=self.settings.addressee_judge_timeout_seconds,
@@ -907,6 +939,7 @@ class WeChatAgent:
                         memory_context=memory_context,
                         followup_to=followup_to,
                         addressee=addressee_note,
+                        proactive_block=speech_block,
                     )
                 else:
                     reply = self._reply_with_context(
@@ -920,6 +953,7 @@ class WeChatAgent:
                         memory_context=memory_context,
                         followup_to=followup_to,
                         addressee=addressee_note,
+                        proactive_block=speech_block,
                     )
                 reply_text = reply.text
                 if proactive and str(reply_text or "").strip().strip("[] ") == "不回复":
@@ -1120,6 +1154,7 @@ class WeChatAgent:
         memory_context: dict | None = None,
         followup_to: MessageEvent | None = None,
         addressee: dict | None = None,
+        proactive_block: list[ConversationMessage] | None = None,
     ):
         """Call the richer prompt contract while keeping small test doubles compatible."""
 
@@ -1198,6 +1233,7 @@ class WeChatAgent:
                 allow_voice_reply=allow_voice_reply,
                 reply_delivery=reply_delivery,
                 addressee=addressee,
+                proactive_block=proactive_block,
             )
             delivery = ("voice" if getattr(result, "voice_reply", False) else
                         "image" if getattr(result, "image_only", False) else
