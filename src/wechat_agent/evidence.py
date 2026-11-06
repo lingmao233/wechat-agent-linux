@@ -61,6 +61,10 @@ class RetrievalPlan:
     valid: bool = True
     time_start: str | None = None
     time_end: str | None = None
+    # Default recall produces candidate cards before the plan exists; the
+    # planner then names which of those ids it wants injected.  Empty means
+    # "no default-recall evidence selected" (normal ranking still applies).
+    inject_evidence_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -85,6 +89,9 @@ class EvidenceBundle:
     candidate_decisions: list[dict] = field(default_factory=list)
     fixed_input_tokens: int = 0
     context_projection: dict = field(default_factory=dict)
+    #: Summary of the inferred topic segment (start line, omitted middle,
+    #: truncation flags) that produced ``context_messages``.
+    topic: dict = field(default_factory=dict)
 
 
 def text_tokens(value: str) -> int:

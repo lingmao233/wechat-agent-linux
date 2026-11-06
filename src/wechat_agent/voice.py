@@ -153,6 +153,12 @@ class VoiceService:
                 providers = ["local"]
             elif settings.voice_provider == "wechat":
                 providers = ["wechat"]
+                # WeChat's menu conversion can return nothing for a received
+                # voice even though the saved SILK audio is intact.  Fall back
+                # to the configured ASR instead of turning the message into an
+                # unusable "[语音]".
+                if settings.voice_fallback_provider == "aliyun" and self.api.configured:
+                    providers.append("aliyun")
             else:
                 providers = (["aliyun"] if self.api.configured or settings.voice_provider == "aliyun" else []) + ["wechat"]
             last = VoiceResult("unavailable", reason=audio_error)
@@ -200,6 +206,8 @@ class VoiceService:
                             log.warning("voice cache unavailable error=%s", type(exc).__name__)
                 if result.status == "ok":
                     return result
+                if provider == "wechat" and len(providers) > 1:
+                    log.info("wechat voice conversion unavailable reason=%s; falling back to %s", result.reason, providers[1])
                 if result.status == "unintelligible" or last.status != "unintelligible":
                     last = result
             return last

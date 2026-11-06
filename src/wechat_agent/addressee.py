@@ -98,17 +98,26 @@ def _system_prompt(bot_names: tuple[str, ...]) -> str:
     )
 
 
-def _context_item(item: ConversationMessage) -> dict[str, object]:
+def _context_item(item: ConversationMessage, bot_names: tuple[str, ...] | list[str] = ()) -> dict[str, object]:
     payload: dict[str, object] = {
         "sender": item.sender_name or "unknown",
         "content": str(item.text or "")[:CONTENT_LIMIT],
     }
+    names = {str(name).strip().casefold() for name in bot_names if str(name).strip()}
     if item.reply_to_text:
-        payload["replyTo"] = {
-            "sender": display_sender(item.reply_to_sender),
+        reply_sender = display_sender(item.reply_to_sender)
+        reply: dict[str, object] = {
+            "sender": reply_sender,
             "content": str(item.reply_to_text)[:REPLY_LIMIT],
         }
-    if item.source_role == "assistant":
+        if reply_sender and reply_sender.strip().casefold() in names:
+            # "引用" the bot's own line is the strongest sign this message is
+            # about the bot, even when the quoted sender is a bare nickname.
+            reply["fromAI"] = True
+        payload["replyTo"] = reply
+    if item.source_role == "assistant" or (
+        item.sender_name and str(item.sender_name).strip().casefold() in names
+    ):
         payload["fromAI"] = True
     return payload
 
@@ -168,11 +177,11 @@ def judge_addressee(
     payload = {
         "botNames": [name for name in dict.fromkeys(str(n).strip() for n in bot_names) if name],
         "groupMembers": [name for name in dict.fromkeys(str(n).strip() for n in member_names) if name][:20],
-        "context": [_context_item(item) for item in list(context)[-CONTEXT_LIMIT:]],
+        "context": [_context_item(item, bot_names) for item in list(context)[-CONTEXT_LIMIT:]],
         "message": {"sender": str(sender or "unknown"), "content": str(text or "")[:400]},
     }
     continuous = [
-        _context_item(item)
+        _context_item(item, bot_names)
         for item in list(block_messages or ())[-CONTEXT_LIMIT:]
         if str(item.text or "").strip()
     ]

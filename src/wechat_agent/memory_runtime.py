@@ -264,15 +264,21 @@ class MemoryRuntime:
                     continue
             time.sleep(min(0.02, max(0, deadline - time.monotonic())))
 
-    def continuous_window(self, account_id: str, group_id: str, watermark: int, evaluated_at: datetime, *, limit: int | None = None):
+    def continuous_window(self, account_id: str, group_id: str, watermark: int, evaluated_at: datetime, *, limit: int | None = None, max_chars: int | None = None):
         from .models import ConversationMessage
+        from .topic_segment import media_placeholder
+        budget = int(max_chars) if max_chars is not None else int(self.settings.wechat_context_max_chars)
         with self.storage.Session() as session:
             rows = list(session.scalars(select(MessageRow).where(MessageRow.account_id == account_id, MessageRow.group_id == group_id, MessageRow.id < watermark, MessageRow.observed_at <= evaluated_at, MessageRow.lifecycle_status == "active", MessageRow.text_kind != "system").order_by(MessageRow.id.desc()).limit(limit if limit is not None else self.settings.wechat_context_messages)))
             messages = []
             used = 0
             for row in rows:
                 text = self.storage._row_text(row)
-                if not text or used + len(text) > self.settings.wechat_context_max_chars:
+                # Media rows occasionally carry the whole XML payload; the prompt
+                # only needs the placeholder, and counting the XML against the
+                # window budget would silently drop real text messages.
+                text = media_placeholder(text) or text
+                if not text or used + len(text) > budget:
                     continue
                 messages.append(ConversationMessage(sender_name=row.member_name, sender_id=row.member_id, text=text, message_id=row.external_message_id or str(row.id), observed_at=aware(row.source_created_at or row.observed_at), image_paths=json.loads(row.image_paths_json), source_role="assistant" if row.is_self else row.source_role, reply_to_sender=row.reply_to_sender or "", reply_to_text=(row.reply_to_text or "")[:200]))
                 used += len(text)

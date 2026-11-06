@@ -39,6 +39,7 @@ def config_fields() -> list[dict]:
         },
         "语音识别": {
             "voice_enabled": "理解收到的语音", "voice_provider": "语音转文字方式",
+            "voice_fallback_provider": "微信转文字失败后的备用识别",
             "asr_model": "阿里云语音识别模型", "voice_model": "可选本地语音模型或目录",
             "voice_language": "语音语言（zh 或 auto）", "voice_timeout_seconds": "识别最长等待（秒）",
             "wechat_voice_conversion_timeout_seconds": "微信转文字等待（秒）",
@@ -97,6 +98,8 @@ def config_fields() -> list[dict]:
                 item.update(type="select", options=["auto", "linux", "windows"])
             if key == "voice_provider":
                 item.update(type="select", options=["auto", "aliyun", "wechat", "local"])
+            if key == "voice_fallback_provider":
+                item.update(type="select", options=["aliyun", "none"])
             if key == "tts_provider":
                 item.update(type="select", options=["aliyun", "openai_compatible", "elevenlabs"])
             if key == "tts_language":
@@ -104,7 +107,8 @@ def config_fields() -> list[dict]:
             if category == "语音识别":
                 item["description"] = {
                     "voice_enabled": "先转写，再判断称呼、关键词和随机接话；确实听不懂时请对方重说。",
-                    "voice_provider": "auto：配置阿里云后优先尝试，失败或无法理解时用微信转文字；wechat：仅用微信，无需 ASR 模型；local：可选本地识别。",
+                    "voice_provider": "auto：配置阿里云后优先尝试，失败或无法理解时用微信转文字；wechat：优先微信转文字，无需 ASR 模型；local：可选本地识别。",
+                    "voice_fallback_provider": "wechat 模式下微信没有返回转写时，是否用阿里云 ASR 识别已保存的语音音频；aliyun：调用一次并缓存结果，none：维持仅微信。",
                     "asr_model": "默认 qwen-audio-3.1-asr-flash；auto/aliyun 使用此模型，wechat 不会调用。实际方言准确度需用录音验证。",
                     "voice_model": "仅 local 使用，需额外安装 local-asr；auto/wechat 不下载 small 模型。",
                     "voice_language": "zh 适合中文群聊；auto 由模型识别语言，适合混合语言。",

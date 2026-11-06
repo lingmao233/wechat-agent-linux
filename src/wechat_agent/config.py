@@ -185,6 +185,21 @@ class Settings(BaseSettings):
     # small, bounded window of messages from the current group for prompt context.
     wechat_context_messages: int = Field(default=12, ge=0, le=50)
     wechat_context_max_chars: int = Field(default=6000, ge=500, le=30_000)
+    # A flat "last N rows" window mixes topics and lets one long media payload
+    # eat the budget.  The reply prompt is built from one inferred topic
+    # segment instead: walk back from the triggering message until the group
+    # went quiet, keep the segment's opening lines plus the newest lines, and
+    # mark what was cut.  Every number stays tunable for quiet groups.
+    context_topic_enabled: bool = True
+    context_topic_gap_seconds: int = Field(default=300, ge=30, le=3600)
+    context_topic_max_minutes: int = Field(default=30, ge=1, le=1440)
+    context_topic_max_messages: int = Field(default=12, ge=2, le=50)
+    context_topic_head_messages: int = Field(default=3, ge=1, le=10)
+    context_topic_scan_messages: int = Field(default=40, ge=12, le=200)
+    context_topic_scan_chars: int = Field(default=12_000, ge=500, le=60_000)
+    # One prompt row never carries more than this; the model gets a "chars" /
+    # "truncated" marker instead of silently reading a cut sentence.
+    context_message_max_chars: int = Field(default=1200, ge=100, le=30_000)
     # Image rows are downloaded from the local WeChat attachment store before
     # being sent as bounded data URLs to a vision-capable OpenAI-compatible
     # model. Recognition is opt-in at runtime and never uploads raw paths.
@@ -201,6 +216,11 @@ class Settings(BaseSettings):
     # Whisper is optional and is never downloaded by the default provider.
     voice_enabled: bool = True
     voice_provider: Literal["auto", "aliyun", "wechat", "local"] = "auto"
+    # WeChat's built-in conversion is preferred in ``wechat`` mode, but it can
+    # silently return no transcript for a received voice.  When Aliyun audio is
+    # configured, retry the saved SILK audio with the ASR model instead of
+    # dropping the message.  Set to ``none`` to keep the old WeChat-only path.
+    voice_fallback_provider: Literal["aliyun", "none"] = "aliyun"
     aliyun_audio_base_url: str = ""
     aliyun_audio_api_key: str = ""
     # Only remote image/audio calls use this; LAN chat and memory keep their routes.

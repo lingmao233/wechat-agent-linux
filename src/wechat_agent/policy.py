@@ -251,8 +251,11 @@ class ActionPolicy:
             # WeChat may insert a special-width space after the mention.  It
             # is normalized above, and punctuation/end-of-message closes the
             # name so @AI助手 does not accidentally count as @AI.
+            # The look-behind must only exclude ASCII word characters: Python's
+            # ``\w`` also matches CJK, which used to reject "我已经放假了@Away"
+            # and made @ work only at the very start of a message.
             mention_pattern = (
-                rf"(?<![\w@])@\s*{escaped}"
+                rf"(?<![A-Za-z0-9_@])@\s*{escaped}"
                 rf"(?=$|[\s,，。！？!?：:；;、()（）\[\]【】<>《》])"
             )
             if re.search(mention_pattern, value, flags=re.IGNORECASE):

@@ -17,6 +17,7 @@ from .image_context import select_image_paths
 from .llm import LLMClient
 from .models import ConversationMessage, MemoryFact, MessageEvent, OutboundAction
 from .policy import ActionPolicy
+from .quote_identity import quoted_message_is_self
 from .profiles import (
     extract_member_profile_patch,
     extract_task_patch,
@@ -32,6 +33,7 @@ from .social import INTIMATE_AFFINITY_THRESHOLD, parse_address_request
 from .storage import Storage
 from .textnorm import normalize_chat_text
 from .timefmt import stamp
+from .topic_segment import build_topic_segment
 from .web_research import WebResearchClient
 from .platform import create_backend as WeixinUiAdapter
 from .memory_runtime import MemoryRuntime
@@ -630,6 +632,10 @@ class WeChatAgent:
             log.info("message skipped member=%s reason=system_message", event.member_name)
             return False
         proactive = reason.startswith("proactive_")
+        # Summary of the inferred topic segment that produced this turn's
+        # context window; rendered as <wechat_topic> so the model can tell the
+        # opening line from the middle and knows when older text was cut.
+        topic_context: dict | None = None
         voice_clarification = reason in {"voice_unintelligible", "voice_unavailable"}
         followup_to = self._followup_for(event) if not proactive and not voice_clarification else None
         if followup_to is not None:
@@ -714,6 +720,22 @@ class WeChatAgent:
                 context_messages = self._merge_context_messages(context_messages, related)
             except AttributeError:
                 pass
+            if self.settings.context_topic_enabled and context_messages:
+                segment = build_topic_segment(
+                    context_messages,
+                    trigger_at=event.observed_at,
+                    gap_seconds=self.settings.context_topic_gap_seconds,
+                    max_minutes=self.settings.context_topic_max_minutes,
+                    max_messages=self.settings.context_topic_max_messages,
+                    scan_limit=self.settings.context_topic_scan_messages,
+                    head_messages=self.settings.context_topic_head_messages,
+                    timezone_name=self.settings.group_timezone,
+                ).trim_to_chars(self.settings.wechat_context_max_chars)
+                context_messages = segment.messages
+                topic_context = segment.to_dict(
+                    timezone_name=self.settings.group_timezone, include_ids=True
+                )
+                topic_context["enabled"] = True
             profile_context = {
                 "user": self.storage.user_profile(event.account_id, event.group_id, event.member_id),
                 "ai": self.storage.ai_profile(event.account_id, event.group_id),
@@ -741,6 +763,7 @@ class WeChatAgent:
             evidence_bundle = self.orchestrator.retrieve_evidence(event, message_id=event_id)
             memory_context = self.orchestrator.assemble_context(evidence_bundle)
             context_messages = evidence_bundle.context_messages
+            topic_context = dict(getattr(evidence_bundle, "topic", {}) or {}) or None
             memories = [MemoryFact(account_id=item.account_id, group_id=item.group_id, member_id=item.actor_member_id, memory_type=item.memory_type, content=item.content, confidence=item.confidence, status=item.lifecycle_status, source_message_ids=item.source_message_ids, metadata={"actor_name": item.actor_name, "source_role": item.source_role, "occurred_at": item.occurred_at, "source_uri": item.source_uri}) for item in evidence_bundle.evidence]
         elif not is_image_request and not voice_clarification and (self.settings.emotion_layer_enabled or self.settings.semantic_group_profile_enabled):
             from .semantic_profiles import SemanticProfiles
@@ -940,6 +963,7 @@ class WeChatAgent:
                         followup_to=followup_to,
                         addressee=addressee_note,
                         proactive_block=speech_block,
+                        topic_context=topic_context,
                     )
                 else:
                     reply = self._reply_with_context(
@@ -954,6 +978,7 @@ class WeChatAgent:
                         followup_to=followup_to,
                         addressee=addressee_note,
                         proactive_block=speech_block,
+                        topic_context=topic_context,
                     )
                 reply_text = reply.text
                 if proactive and str(reply_text or "").strip().strip("[] ") == "不回复":
@@ -1155,6 +1180,7 @@ class WeChatAgent:
         followup_to: MessageEvent | None = None,
         addressee: dict | None = None,
         proactive_block: list[ConversationMessage] | None = None,
+        topic_context: dict | None = None,
     ):
         """Call the richer prompt contract while keeping small test doubles compatible."""
 
@@ -1163,6 +1189,7 @@ class WeChatAgent:
         if followup_to is None and not proactive:
             followup_to = self._followup_for(event)
         reply_to = event.reply_to
+        reply_to_is_self = quoted_message_is_self(self.storage, event.account_id, event.group_id, reply_to)
         if reply_to is not None:
             quote = normalize_chat_text(
                 reply_to.text,
@@ -1220,6 +1247,7 @@ class WeChatAgent:
                 context_messages=context_messages,
                 source_context=source_context,
                 reply_to=reply_to,
+                reply_to_is_self=reply_to_is_self,
                 followup_to=followup_to,
                 group_style_profile=group_style_profile,
                 profile_summary=profile_summary,
@@ -1234,6 +1262,7 @@ class WeChatAgent:
                 reply_delivery=reply_delivery,
                 addressee=addressee,
                 proactive_block=proactive_block,
+                topic_context=topic_context,
             )
             delivery = ("voice" if getattr(result, "voice_reply", False) else
                         "image" if getattr(result, "image_only", False) else

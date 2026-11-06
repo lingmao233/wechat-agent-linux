@@ -1,4 +1,4 @@
-"""Small deterministic guard for the whale-girl persona's output.
+﻿"""Small deterministic guard for the whale-girl persona's output.
 
 The persona prompt does most of the work, but a model can still slip into
 "作为一个 AI" phrasing, overuse emoji, or escalate a playful tease into a
@@ -27,7 +27,8 @@ __all__ = [
 TONE_LEXICON: dict[str, tuple[str, ...]] = {
     "insulted": ("坏蛋", "大坏蛋", "讨厌", "欺负人", "过分"),
     "teased": ("笨笨", "傻傻的", "想得美", "就你话多", "皮痒了"),
-    "praised": ("哼", "这还用你说", "少来这套……不过还行", "也不看看我是谁"),
+    # 「哼」不作为被夸场景的示例词：它容易被模型当成万能开场，变成每条都哼。
+    "praised": ("这还用你说", "少来这套……不过还行", "也不看看我是谁", "算你有眼光"),
     "indulgent": ("笨蛋",),
 }
 
@@ -115,6 +116,24 @@ _SEVERE_INSULT_RE = re.compile(
     r"傻\s*逼|傻\s*B|煞\s*笔|沙\s*比", re.IGNORECASE
 )
 
+# 傲娇角色被夸时不能退回谦虚客套。提示词已经禁止，但人设示例和模型惯性仍会
+# 偶尔把「不好意思」写出来，这里做一次确定性的兜底改写（只作用于内置大肥鱼）。
+# 只在「害羞地接受夸奖」的语境替换；「不好意思，我记错了」这类道歉含义不动。
+_SHY_ACCEPT_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"怪让人不好意思的?|让人不好意思的?|有点不好意思的?|都不好意思(?:了|的)?"
+        ),
+        "心里还挺受用的",
+    ),
+    (re.compile(r"害羞|羞涩|腼腆"), "嘴硬"),
+)
+
+# “哼”不能变成口头禅：连续回复里不重复，单条回复最多一个，连写的“哼哼哼”
+# 合并成一个。哼唱 / 哼歌 / 哼着 这类实词不属于语气词，保持原样。
+_HENG_RE = re.compile(r"(?<!哼)哼(?![唱歌曲着调首])")
+_HENG_RUN_RE = re.compile(r"哼{2,}")
+
 # ``None`` marks a slot that is picked from the insulted scene at runtime
 # instead of hard-coded to one word.  ``笨蛋`` used to be that word and became
 # the persona's only comeback; 坏蛋/大坏蛋/讨厌 rotate instead.
@@ -182,7 +201,20 @@ class ToneWordRotator:
     def __init__(self, *, history_size: int = 5, seed: int | None = None) -> None:
         self.history_size = max(1, int(history_size))
         self._window: deque[tuple[str, ...]] = deque(maxlen=self.history_size)
+        # 独立记录最近两条回复是否用了语气词「哼」。它不计入互损词轮转，
+        # 只用来阻止「哼」变成连续多条的固定开场。
+        self._heng_window: deque[bool] = deque(maxlen=2)
         self._rng = random.Random(seed)
+
+    def heng_used_recently(self) -> bool:
+        """Whether the previous two replies used the ``哼`` interjection."""
+
+        return any(self._heng_window)
+
+    def note_heng(self, used: bool) -> None:
+        """Record whether the reply that was just rendered kept a ``哼``."""
+
+        self._heng_window.append(bool(used))
 
     def recent_words(self) -> tuple[str, ...]:
         """Words used in the last replies, oldest first, without duplicates."""
@@ -205,6 +237,7 @@ class ToneWordRotator:
 
     def reset(self) -> None:
         self._window.clear()
+        self._heng_window.clear()
 
     def choose(
         self,
@@ -325,6 +358,33 @@ def contains_severe_profanity(text: str) -> bool:
     return any(pattern.search(str(text or "")) for pattern, _ in _SEVERE_REPLACEMENTS)
 
 
+def _limit_heng(value: str, *, allow: bool) -> str:
+    """Collapse ``哼哼哼`` and stop ``哼`` from repeating across replies.
+
+    ``allow=False`` drops the interjection outright, which is used when one of
+    the previous two replies already had it; otherwise only the first one is
+    kept.  A removed ``哼`` also takes one adjacent comma with it so the result
+    never starts with a dangling punctuation mark.
+    """
+
+    if "哼" not in value:
+        return value
+    value = _HENG_RUN_RE.sub("哼", value)
+    spans = [match.span() for match in _HENG_RE.finditer(value)]
+    if not spans:
+        return value
+    remove = spans if not allow else spans[1:]
+    for start, end in reversed(remove):
+        if start > 0 and value[start - 1] in "，,、":
+            start -= 1
+        elif end < len(value) and value[end] in "，,、":
+            end += 1
+        value = value[:start] + value[end:]
+    value = re.sub(r"[，,、]{2,}", "，", value)
+    value = re.sub(r"^[，,、\s]+", "", value).strip()
+    return value
+
+
 def sanitize_persona_reply(
     text: str,
     *,
@@ -358,6 +418,10 @@ def sanitize_persona_reply(
         # "冒个泡" is the same bubble gimmick in a different wording; keep the
         # sentence natural instead of deleting it outright.
         value = re.sub(r"冒个泡|冒泡", "说一声", value)
+        # 被夸时退回「不好意思/害羞」是客服腔，不是傲娇；只改害羞语境，
+        # 保留「不好意思，我记错了」这类道歉用法。
+        for pattern, replacement in _SHY_ACCEPT_REPLACEMENTS:
+            value = pattern.sub(replacement, value)
     used_insult: set[str] = {
         word for _, _, word in _tone_matches(value)
     }
@@ -388,5 +452,7 @@ def sanitize_persona_reply(
     value = re.sub(r"\n{3,}", "\n\n", value).strip()
     value = value or f"{labels['self']}在。"
     if tone is not None:
+        value = _limit_heng(value, allow=not tone.heng_used_recently())
         value = tone.apply(value)
+        tone.note_heng(bool(_HENG_RE.search(value)))
     return value
