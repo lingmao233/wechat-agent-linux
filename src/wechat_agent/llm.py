@@ -53,9 +53,11 @@ _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$")
 # A protocol object may sit on its own line ("行首 {") after the reply text.
 _TAIL_JSON_START_RE = re.compile(r"(?m)^[ \t]*(\{)")
 # Some providers omit the newline entirely: "正文{"text":...}".
-_INLINE_REPLY_JSON_RE = re.compile(r'\{\s*"text"\s*:')
+# The first key is not guaranteed to be "text": a production leak on
+# 2026-11-10 was {"delivery":"voice","text":...}{"delivery":"voice",...}.
+_INLINE_REPLY_JSON_RE = re.compile(r'\{\s*"(?:text|delivery|reaction_image|sticker_intent)"\s*:')
 # Final defense: the visible reply-text object shape, even when truncated.
-_STRUCTURED_LEAK_RE = re.compile(r'\{\s*"text"\s*:')
+_STRUCTURED_LEAK_RE = re.compile(r'\{\s*"(?:text|delivery|reaction_image|sticker_intent)"\s*:')
 _STRUCTURED_LEAK_MARKERS = ('"delivery"', '"reaction_image"', '"sticker_intent"')
 
 
@@ -164,6 +166,38 @@ class LLMClient:
         )
 
     @classmethod
+    def _parse_reply_object_stream(cls, value: str) -> list[dict]:
+        """Parse one or more adjacent protocol objects covering the whole text.
+
+        A provider occasionally concatenates two complete replies, e.g.
+        ``{"delivery":"voice","text":"A"}{"delivery":"voice","text":"B"}``.
+        ``json.loads`` fails on that whole string, so without this the raw
+        protocol text reaches the group (production incident 2026-11-10).
+        Only a stream that consumes the entire input and whose every item is a
+        structured reply object qualifies; arbitrary JSON stays visible text.
+        """
+
+        text = str(value or "").strip()
+        if not text.startswith("{"):
+            return []
+        decoder = json.JSONDecoder()
+        objects: list[dict] = []
+        index = 0
+        while index < len(text):
+            while index < len(text) and text[index].isspace():
+                index += 1
+            if index >= len(text):
+                break
+            try:
+                parsed, index = decoder.raw_decode(text, index)
+            except (ValueError, TypeError):
+                return []
+            if not isinstance(parsed, dict) or not cls._is_structured_reply(parsed):
+                return []
+            objects.append(parsed)
+        return objects
+
+    @classmethod
     def _split_trailing_reply_json(cls, value: str) -> tuple[str, dict | None]:
         """Split "natural reply + trailing protocol JSON" provider output.
 
@@ -183,11 +217,20 @@ class LLMClient:
             candidate = text[start:].strip()
             if candidate.endswith("```"):
                 candidate = candidate[:-3].rstrip()
+            parsed: dict | None = None
             try:
-                parsed = json.loads(candidate)
+                single = json.loads(candidate)
             except (ValueError, TypeError):
-                continue
-            if not isinstance(parsed, dict) or not cls._is_structured_reply(parsed):
+                single = None
+            if isinstance(single, dict) and cls._is_structured_reply(single):
+                parsed = single
+            else:
+                # "正文{"delivery":"voice","text":"..."}{"delivery":"voice",...}"
+                # or two adjacent protocol objects: keep the final reply.
+                stream = cls._parse_reply_object_stream(candidate)
+                if len(stream) >= 2:
+                    parsed = stream[-1]
+            if parsed is None:
                 continue
             prefix = text[:start].rstrip()
             fence_line = prefix.rsplit("\n", 1)[-1].strip().casefold()
@@ -416,6 +459,7 @@ class LLMClient:
                  '语音不是必选，选择最自然的形式即可。若选择语音，仅输出 JSON ') +
                 '{"delivery":"voice","text":"要实际说出的完整话语"}，text 不超过 200 字，'
                 '不放动作旁白、链接、表情符号、Markdown 或技术说明；会先完整生成声音再发送。'
+                '一次只输出一个 JSON 对象：不要输出两个候选、不要同一条回答写两遍，也不要输出数组。'
                  '语音与配图互斥，一次选一种形式。若选文字或图片，沿用对应的回复格式。' +
                  ('本轮使用 delivery=singing，写出实际唱的短句；不要只写“我来唱”。' if require_singing else
                   '本轮使用 delivery=voice，写出实际要说的话。' if require_voice else
@@ -745,6 +789,13 @@ class LLMClient:
         structured = self._parse_json_object(text)
         if structured is not None and not self._is_structured_reply(structured):
             structured = None
+        if structured is None:
+            # Some providers emit two complete reply objects back to back; a
+            # single json.loads cannot parse them and the raw protocol text used
+            # to leak into the group (2026-11-10).  Use the final object.
+            stream = self._parse_reply_object_stream(text)
+            if len(stream) >= 2:
+                structured = stream[-1]
         trailing_json = False
         if structured is None:
             # Providers sometimes append the delivery protocol object after the
