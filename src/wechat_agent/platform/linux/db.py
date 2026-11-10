@@ -223,7 +223,10 @@ class WeChatLinuxDB:
                    if chat.chat_id == identifier or chat.name == value]
         if len(matches) != 1:
             raise BackendError("CHAT_NOT_FOUND" if not matches else "CHAT_AMBIGUOUS", f"无法唯一定位已配置会话 {value}；在 WECHAT_LINUX_CHAT_IDS 中设置稳定 ID")
-        return ChatInfo(matches[0].chat_id, value)
+        # Keep the real display name: callers may pass a stable wxid for a
+        # private chat (two contacts can share one nickname), and the prompt
+        # should still see the human-readable chat name rather than the id.
+        return ChatInfo(matches[0].chat_id, matches[0].name)
 
     def private_chats(self, configured: list[str] | tuple[str, ...] = ()) -> list[ChatInfo]:
         """Return user conversations, optionally narrowed by names/wxids."""

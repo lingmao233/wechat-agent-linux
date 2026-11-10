@@ -123,7 +123,10 @@ class LinuxBackend:
             # Private polling is allowlist-only.  An empty allowlist must not
             # turn into an implicit "discover every direct chat" scope.
             if configured:
-                names.extend(chat.name for chat in self.db.private_chats(configured))
+                # Keep the stable chat id, not the display name: two WeChat
+                # contacts can share the same nickname ("Oo" on 2026-11-10),
+                # and re-resolving by display name is then ambiguous.
+                names.extend(chat.chat_id for chat in self.db.private_chats(configured))
         return list(dict.fromkeys(name for name in names if str(name).strip()))
 
     def private_chats(self, configured: list[str] | tuple[str, ...] = ()):
