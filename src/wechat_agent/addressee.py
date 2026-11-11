@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import homophones
 from .models import ConversationMessage
@@ -77,7 +77,9 @@ def _system_prompt(bot_names: tuple[str, ...]) -> str:
         "1. botNames 就是机器人的名字。消息里叫到这些名字（含同音错字）时，默认是在叫机器人，"
         "addressed_to_ai=yes；除非上下文明确显示群里另有同名的真人，或这个名字只是被顺口提到、"
         "并不是在称呼人。\n"
-        "2. 明确叫到机器人、@机器人、引用机器人的话、或明显在问机器人时，addressed_to_ai=yes。\n"
+        "2. 明确叫到机器人、@机器人、引用机器人的话、回应机器人的上一句、或明显在问机器人时，"
+        "addressed_to_ai=yes。上下文里 fromAI=true 的消息就是机器人自己说的；"
+        "如果 target 写的是 botNames 里的名字，addressed_to_ai 必须是 yes，不能写 no。\n"
         "3. 如果这条消息是在回另一个真人、或明显在跟另一个真人说话（没有叫到机器人），"
         "addressed_to_ai=no，target 写那个真人的名字。\n"
         "3b. 如果这条消息紧接在一个真人刚对另一个真人说的话之后（尤其是短句、感叹、玩笑），"
@@ -88,7 +90,8 @@ def _system_prompt(bot_names: tuple[str, ...]) -> str:
         "“晓雨”也可能是“小鱼”。语义不通或人名对不上时，先按最可能的同音词理解，"
         "不要把错字当成新人物、新词或新的称呼。\n"
         "6. reply_to_human 表示这条消息是不是在接一个真人：引用真人的话、回应真人的上一句，"
-        "都填 true。\n"
+        "都填 true；如果接的是机器人（上下文 fromAI=true 或 target 是 botNames 里的名字），"
+        "必须填 false。\n"
         "7. 如果输入带 continuousMessages（同一个群友在本条消息前紧接着连续说的几句），"
         "把 message 和 continuousMessages 当成同一段连续发言来判断：本条可能只是补充、转折或接话，"
         "真正的说话对象和话题可能在前一句里，不要只看本条最后一句的字面内容。\n"
@@ -196,7 +199,15 @@ def judge_addressee(
         )
     except Exception as exc:  # noqa: BLE001 - judge failure must not block replies
         return AddresseeVerdict(reason=f"judge error {type(exc).__name__}", source="fallback")
-    return parse_verdict(raw)
+    verdict = parse_verdict(raw)
+    # The model sometimes names the bot itself as the target (e.g. "target":
+    # "Away") but still writes addressed_to_ai=no, which used to skip a direct
+    # follow-up such as Xi's "我没有包子小鱼" (2026-11-11).  A target that is a
+    # configured bot name is unambiguous: it is addressed to the bot.
+    bot_keys = {str(name).strip().casefold() for name in bot_names if str(name).strip()}
+    if verdict.target and verdict.target.strip().casefold() in bot_keys:
+        verdict = replace(verdict, addressed_to_ai=ADDRESSED_YES, reply_to_human=False)
+    return verdict
 
 
 def self_names(bot_names: tuple[str, ...] | list[str] | None) -> list[str]:

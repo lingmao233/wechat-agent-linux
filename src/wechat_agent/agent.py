@@ -1105,7 +1105,9 @@ class WeChatAgent:
             if event.proactive_window_id:
                 self.scheduler.release(event.proactive_window_id, reason=type(exc).__name__)
             finish("failed", f"{type(exc).__name__}: {str(exc)[:240]}", reply_text)
-            self.stats.failed += 1
+            # The caller (`_run_linux`) counts this failure once at the cycle
+            # boundary; incrementing here too made one failed send appear as
+            # two "异常任务" (2026-11-10 18:45 voice send failure).
             raise
 
     def _research_sources(self, analysis_text: str):
