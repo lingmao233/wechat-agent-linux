@@ -137,8 +137,50 @@ class AtspiUI:
         self._command(["xdotool", "windowactivate", "--sync", window])
         self._command(["xdotool", "windowfocus", "--sync", window])
         self._window_id = window
+        # WeChat 4.x opens its global search/搜一搜 results in a separate
+        # always-on-top window.  A stale one (for example left behind by the
+        # optional voice-cache flush) covers the chat list: AT-SPI coordinates
+        # are then clicked on the wrong window and every send fails header
+        # verification.  Close only those auxiliary search windows.
+        self._close_search_overlays()
 
-    def open_chat(self, chat: ChatInfo) -> None:
+    def _close_search_overlays(self) -> None:
+        candidates: list[tuple[str, bool]] = []
+        try:
+            candidates += [(window.strip(), False) for window in self._command(["xdotool", "search", "--class", "^wechat$"]).splitlines() if window.strip()]
+        except BackendError:
+            pass
+        # WeChat 4.x renders 搜一搜 in a separate WeChatAppEx (Chromium) window
+        # titled "微信" but with class com.tencent.wechatappex.  It is larger
+        # than the main window, stays above it and swallows clicks, so the
+        # regular class-wechat scan above does not see it.
+        try:
+            candidates += [(window.strip(), True) for window in self._command(["xdotool", "search", "--class", "com.tencent.wechatappex"]).splitlines() if window.strip()]
+        except BackendError:
+            pass
+        for window, auxiliary in dict.fromkeys(candidates):
+            try:
+                title = self._command(["xdotool", "getwindowname", window]).strip()
+            except BackendError:
+                continue
+            is_search = "搜一搜" in title
+            if not is_search and auxiliary:
+                try:
+                    geometry = self._command(["xdotool", "getwindowgeometry", "--shell", window])
+                    size = {key: int(value) for key, value in re.findall(r"^(WIDTH|HEIGHT)=(-?\d+)$", geometry, re.MULTILINE)}
+                    # The visible search window is a real chat-sized window;
+                    # the 10x10 hidden helper must be left alone.
+                    is_search = min(size.get("WIDTH", 0), size.get("HEIGHT", 0)) > 100
+                except (BackendError, ValueError):
+                    is_search = False
+            if not is_search:
+                continue
+            try:
+                self._command(["xdotool", "windowclose", window])
+            except BackendError:
+                log.debug("search overlay close failed window=%s", window)
+
+    def open_chat(self, chat: ChatInfo, *, allow_search: bool = True) -> None:
         if self.app is None:
             self.connect()
         self.focus()
@@ -152,6 +194,8 @@ class AtspiUI:
             except Exception:
                 continue
         if not candidates:
+            if not allow_search:
+                raise BackendError("CHAT_NOT_VISIBLE", "目标会话不在微信 Chats 列表中；本次不打开全局搜索")
             candidates = self._search_chat_candidates(chat)
         if len(candidates) != 1:
             if not candidates:
@@ -658,15 +702,25 @@ class AtspiUI:
         if chat.chat_id == "filehelper":
             return
         # This client may save audioTxt only when leaving the conversation.
+        # Only use the visible chat sidebar here: searching for filehelper in
+        # WeChat 4.x opens a separate 搜一搜 window that covers the chat list,
+        # which used to leave the UI unable to verify future sends
+        # (CHAT_IDENTITY_UNCONFIRMED, screenshots on 2026-11-05/2026-11-10).
+        # If filehelper is not in the sidebar, skip the flush; the Aliyun ASR
+        # fallback still transcribes the saved audio.
         for label in ("文件传输助手", "File Transfer"):
             try:
-                self.open_chat(ChatInfo("filehelper", label))
+                self.open_chat(ChatInfo("filehelper", label), allow_search=False)
             except BackendError as exc:
-                if exc.code == "CHAT_NOT_VISIBLE":
+                if exc.code in {"CHAT_NOT_VISIBLE", "CHAT_AMBIGUOUS"}:
                     continue
                 raise
-            self.open_chat(chat)
-            return
+            try:
+                return
+            finally:
+                # Always restore the original conversation, even if a later
+                # conversion read fails; never leave another chat selected.
+                self.open_chat(chat, allow_search=False)
 
     def panel(self) -> tuple[str, int, int, int, int]:
         tree = self._command(["xwininfo", "-root", "-tree"])
