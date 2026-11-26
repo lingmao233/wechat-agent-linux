@@ -112,10 +112,38 @@ def parse_message(row: dict[str, Any], *, account_id: str, chat_id: str, chat_na
                     (raw.rsplit(":", 1)[-1] if re.fullmatch(r"[0-9]{1,4}:[0-9]{1,6}", raw) else ""))
         if duration.isdigit():
             event.media_metadata["voice_duration_seconds"] = int(duration) / 1000
+    elif base_type == 43:
+        # A video chosen through the file picker may be uploaded as a native
+        # video message (type 43), not an appmsg document.  ``length`` is the
+        # exact file size and is the stable read-back key for the file sender.
+        video = root if root is not None and root.tag == "videomsg" else root.find(".//videomsg") if root is not None else None
+        event.message_type = "video"
+        event.text = "[视频]"
+        event.media_metadata["video"] = dict(video.attrib) if video is not None else {}
+        event.media_metadata["raw_xml"] = raw
+        try:
+            event.media_metadata["video_length"] = int(video.get("length", "0")) if video is not None else 0
+        except (TypeError, ValueError):
+            event.media_metadata["video_length"] = 0
     elif base_type == 49:
         event.message_type = "appmsg"
         event.text = _text(root, ".//appmsg/title") or raw
         event.media_metadata["raw_xml"] = raw
+        # ``appmsg/type`` 6 is a file attachment and 8 is an animated
+        # emoticon/GIF.  The latter carries the exact byte length and file
+        # extension under ``appattach``, which is the read-back identity for a
+        # GIF sent through the file picker.
+        appmsg_type = _text(root, ".//appmsg/type")
+        event.media_metadata["appmsg_type"] = appmsg_type
+        if appmsg_type == "8":
+            attach = root.find(".//appmsg/appattach") if root is not None else None
+            attributes = dict(attach.attrib) if attach is not None else {}
+            event.media_metadata["appattach"] = attributes
+            try:
+                event.media_metadata["appmsg_totallen"] = int(_text(root, ".//appmsg/appattach/totallen") or 0)
+            except (TypeError, ValueError):
+                event.media_metadata["appmsg_totallen"] = 0
+            event.media_metadata["appmsg_fileext"] = _text(root, ".//appmsg/appattach/fileext").lower()
     elif base_type != 1:
         event.message_type = "other"
     return event

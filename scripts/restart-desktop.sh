@@ -9,6 +9,7 @@ usage() {
 用法: bash scripts/restart-desktop.sh [选项]
 
   --start-agent   控制台就绪后自动调用一次 /api/start，Agent 立即开始工作
+  --keep-log      不截断旧日志，追加一条重启分隔线（抖音桥看门狗自动重启时使用）
   --port N        控制台端口，默认 8765（也可用环境变量 WECHAT_DESKTOP_PORT）
   -h, --help      显示本帮助
 
@@ -19,9 +20,11 @@ EOF
 
 PORT="${WECHAT_DESKTOP_PORT:-8765}"
 start_agent=0
+keep_log=0
 while (($#)); do
   case "$1" in
     --start-agent) start_agent=1; shift ;;
+    --keep-log) keep_log=1; shift ;;
     --port)
       [[ -n "${2:-}" ]] || { printf '选项 --port 需要参数\n' >&2; exit 2; }
       PORT="$2"; shift 2 ;;
@@ -77,7 +80,11 @@ if command -v gdbus >/dev/null && [[ -n "${AT_SPI_BUS_ADDRESS:-}" ]]; then
 fi
 
 mkdir -p -- "$STATE_DIR"
-: >"$LOG"
+if ((keep_log)); then
+  printf '\n==== restart %s ====\n' "$(date '+%F %T')" >>"$LOG"
+else
+  : >"$LOG"
+fi
 printf '启动控制台: %s -m wechat_agent desktop --port %s\n' "$PY" "$PORT"
 setsid nohup "$PY" -m wechat_agent desktop --config "$ENV_FILE" --port "$PORT" >>"$LOG" 2>&1 &
 disown $! 2>/dev/null || true

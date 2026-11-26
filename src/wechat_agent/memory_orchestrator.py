@@ -22,7 +22,7 @@ from .memory_schema import EpisodeRow, LifecycleRow
 from .quote_identity import quoted_message_is_self
 from .semantic_profiles import SemanticProfiles
 from .storage import FactRow, MessageRow, TaskProfileRow
-from .timefmt import stamp
+from .timefmt import short_moment_text, stamp
 from .topic_segment import build_topic_segment
 
 log = logging.getLogger(__name__)
@@ -108,9 +108,24 @@ class MemoryOrchestrator:
             tasks = list(session.scalars(select(TaskProfileRow.task_id).where(TaskProfileRow.account_id == event.account_id, TaskProfileRow.group_id == event.group_id)))
             aliases = list(session.execute(select(MessageRow.member_id, MessageRow.member_name).where(MessageRow.account_id == event.account_id, MessageRow.group_id == event.group_id).distinct()).all())
         members = {identifier: name for identifier, name in aliases if identifier}
+        from .aliases import alias_service
+
+        service = alias_service(self.runtime)
+        directory = service.directory(event.account_id, event.group_id)
+        if not directory:
+            directory = [{"id": identifier, "name": name, "aliases": []} for identifier, name in members.items()]
+        alias_matches = service.resolve(event.text, event.account_id, event.group_id)
+        resolved = [item for item in alias_matches if not item["ambiguous"]]
+        ambiguous = [item for item in alias_matches if item["ambiguous"]]
         conversation = self._planner_conversation(event)
         fallback = default_plan(event)
         if not self.runtime.llm or not self.settings.llm_api_key:
+            if resolved:
+                fallback.subject_member_ids = [
+                    item["member_id"]
+                    for item in resolved
+                    if item["member_id"] != event.member_id
+                ]
             return self._time_bounds(fallback, event)
         cache = self._plan_cache()
         # Candidate ids are part of the key: a cached plan may only inject
@@ -132,7 +147,15 @@ class MemoryOrchestrator:
                 "timezone": self.settings.group_timezone,
                 "question": event.text,
                 "speaker": {"id": event.member_id, "name": event.member_name},
-                "known_members": [{"id": identifier, "name": name} for identifier, name in members.items()],
+                "known_members": directory[:50],
+                "resolved_members": [
+                    {"id": item["member_id"], "name": item["member_name"], "matched": item["matched"], "method": item["method"]}
+                    for item in resolved[:5]
+                ],
+                "ambiguous_members": [
+                    {"name": item["member_name"], "matched": item["matched"]}
+                    for item in ambiguous[:3]
+                ],
                 "task_ids": tasks,
                 "recent_candidates": cards,
                 "recent_conversation": conversation,
@@ -177,6 +200,14 @@ class MemoryOrchestrator:
             plan = RetrievalPlan(**{field: item for field, item in value.items() if field in allowed})
             plan.queries = list(dict.fromkeys([*plan.queries, event.text[:300]]))[:3]
             plan.subject_member_ids = [identifier for identifier in plan.subject_member_ids if identifier and identifier != event.member_id]
+            if not plan.subject_member_ids and resolved and not ambiguous:
+                # The planner may omit a subject it did not recognise; the
+                # deterministic alias resolver still gives it a safe scope.
+                plan.subject_member_ids = [
+                    item["member_id"]
+                    for item in resolved[:2]
+                    if item["member_id"] != event.member_id
+                ]
             if not plan.memory_types:
                 plan.memory_types = list(fallback.memory_types)
             # A task id the caller already resolved (structured input, not a
@@ -198,6 +229,12 @@ class MemoryOrchestrator:
             return self._time_bounds(plan, event)
         except Exception:
             fallback.valid = False
+            if resolved and not ambiguous:
+                fallback.subject_member_ids = [
+                    item["member_id"]
+                    for item in resolved[:2]
+                    if item["member_id"] != event.member_id
+                ]
             return self._time_bounds(fallback, event)
 
     def _planner_conversation(self, event) -> list[dict]:
@@ -668,7 +705,7 @@ class MemoryOrchestrator:
         """One fact row as evidence, keeping candidate uncertainty visible."""
 
         semantic = max((_similarity(query, fact.content) for query in plan.queries), default=0.0)
-        candidate = fact.status == "candidate"
+        candidate = fact.status == "candidate" or fact.attribution == "reported"
         return EvidenceItem(
             evidence_id=fact.memory_id or "fact-" + str(fact.id),
             object_id=fact.memory_id or "fact-" + str(fact.id),
@@ -679,8 +716,9 @@ class MemoryOrchestrator:
             source_message_ids=json.loads(fact.source_message_ids_json or "[]"),
             source_uri="sql:memory_facts/" + str(fact.id),
             lifecycle_status=fact.status,
-            # A candidate was never confirmed; the prompt must be able to say
-            # "听说/好像" instead of presenting it as established history.
+            # A candidate or a third-party claim was never confirmed by its
+            # subject; the prompt must be able to say "听说/好像" instead of
+            # presenting it as established history.
             source_availability="unverified_relay" if candidate else "available",
             semantic_score=semantic,
         )
@@ -772,6 +810,15 @@ class MemoryOrchestrator:
         query = (getattr(event, "text", "") or "").strip()
         if not query:
             return []
+        try:
+            from .aliases import alias_service
+
+            resolved_ids = [
+                item["member_id"]
+                for item in alias_service(self.runtime).resolve_unique(event.account_id, event.group_id, query)
+            ]
+        except Exception:
+            resolved_ids = []
         plan = RetrievalPlan(needs_memory=True, memory_types=["raw_message"], queries=[query[:300]], time_hint="recent")
         items: list[EvidenceItem] = []
         try:
@@ -796,7 +843,7 @@ class MemoryOrchestrator:
                 account_id=event.account_id,
                 group_id=event.group_id,
                 member_id=event.member_id,
-                member_ids=self._recent_member_ids(event, snapshot),
+                member_ids=list(dict.fromkeys([*self._recent_member_ids(event, snapshot), *resolved_ids])),
                 query=query,
                 half_life_days=self.settings.half_life_for("fact"),
                 limit=6,
@@ -1172,9 +1219,24 @@ class MemoryOrchestrator:
         "preferences", "interests", "tools", "constraints", "confirmed_info",
         "corrections", "expression_habits", "work_style", "task_requirements",
     )
+    _PROMPT_FACT_TYPES = {
+        "preferences": ("preference",),
+        "interests": ("interest",),
+        "tools": ("tool",),
+        "constraints": ("constraint",),
+        "confirmed_info": ("relation", "experience"),
+        "corrections": ("correction",),
+        "expression_habits": ("habit",),
+    }
     _PROMPT_BEHAVIOR_KEYS = (
         "message_count", "average_message_length", "expression_habits",
         "common_topics", "marker_counts",
+    )
+    # Under budget pressure, drop the least decision-relevant lists first.
+    # Preferences are what the model most needs, so they go last.
+    _PROMPT_FIT_ORDER = (
+        "reported_facts", "recent_changes", "expression_habits", "corrections",
+        "tools", "constraints", "confirmed_info", "interests", "preferences",
     )
     _PROMPT_TASK_LISTS = ("requirements", "decisions", "progress", "completed", "blockers", "people")
 
@@ -1193,6 +1255,17 @@ class MemoryOrchestrator:
         text = " ".join(str(value or "").split())
         return text[:limit].rstrip() + ("…" if len(text) > limit else "")
 
+    def _short_stamp_value(self, value: object, *, now: datetime) -> str:
+        """``11-21 20:15`` for a fact line; full date stays on profile header."""
+
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            return ""
+        return short_moment_text(aware(moment), timezone_name=self.settings.group_timezone)
+
     def _prompt_profile(self, profile: object, *, now: datetime) -> dict:
         if not isinstance(profile, dict) or not profile:
             return {}
@@ -1203,16 +1276,78 @@ class MemoryOrchestrator:
         name = self._short_item(profile.get("member_name"), 40)
         if name:
             compact["member_name"] = name
+        aliases = profile.get("aliases")
+        if isinstance(aliases, list) and aliases:
+            cleaned = [self._short_item(item, 20) for item in aliases[:6] if str(item).strip()]
+            if cleaned:
+                compact["aliases"] = cleaned
         note = self._short_item(profile.get("synthesized_note"), 80)
         if note:
             compact["synthesized_note"] = note
+        facts = profile.get("facts") if isinstance(profile.get("facts"), list) else []
+        fact_by_id = {
+            str(item.get("memory_id") or ""): item
+            for item in facts
+            if isinstance(item, dict) and item.get("memory_id")
+        }
         for key in self._PROMPT_PROFILE_LISTS:
             values = profile.get(key)
-            if not isinstance(values, list) or not values:
-                continue
-            items = [self._short_item(item, 60) for item in values[:5] if str(item).strip()]
+            items: list[str] = []
+            types = self._PROMPT_FACT_TYPES.get(key, ())
+            if facts and types:
+                for fact in facts:
+                    if not isinstance(fact, dict) or fact.get("memory_type") not in types:
+                        continue
+                    text = self._short_item(fact.get("content"), 60)
+                    if not text:
+                        continue
+                    when = self._short_stamp_value(fact.get("observed_at"), now=now)
+                    items.append(f"{text}（{when}）" if when else text)
+                    if len(items) >= 5:
+                        break
+            if not items and isinstance(values, list) and values:
+                # Legacy profiles were stored oldest-first and have no per-item
+                # time.  Show the last five (newest) rather than the first five.
+                items = [
+                    self._short_item(item, 60)
+                    for item in list(values)[-5:][::-1]
+                    if str(item).strip()
+                ]
             if items:
                 compact[key] = items
+        changes: list[str] = []
+        for change in (profile.get("recent_changes") or [])[:3]:
+            if not isinstance(change, dict):
+                continue
+            old = self._short_item(change.get("content"), 60)
+            old_time = self._short_stamp_value(change.get("valid_to") or change.get("observed_at"), now=now)
+            if not old:
+                continue
+            replacement = fact_by_id.get(str(change.get("superseded_by") or ""))
+            if replacement:
+                new = self._short_item(replacement.get("content"), 60)
+                new_time = self._short_stamp_value(replacement.get("observed_at"), now=now)
+                changes.append(f"{old}（{old_time}）→ {new}（{new_time}）")
+            else:
+                changes.append(f"{old}（{old_time}）已更新")
+        if changes:
+            compact["recent_changes"] = changes
+        reported = []
+        for item in (profile.get("reported_facts") or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            text = self._short_item(item.get("content"), 60)
+            when = self._short_stamp_value(item.get("observed_at"), now=now)
+            if text:
+                reported.append(f"{text}（{when}，群友说的，未确认）" if when else f"{text}（群友说的，未确认）")
+        if reported:
+            compact["reported_facts"] = reported
+        summary = self._short_item(profile.get("member_summary"), 220)
+        if summary:
+            compact["member_summary"] = summary
+            summary_at = self._stamp_value(profile.get("member_summary_updated_at"), now=now)
+            if summary_at:
+                compact["member_summary_updated_text"] = summary_at
         behavior = profile.get("behavior")
         if isinstance(behavior, dict) and behavior:
             slim: dict[str, object] = {}
@@ -1245,14 +1380,21 @@ class MemoryOrchestrator:
         """Shrink one prompt profile until it fits, keeping the newest fields."""
         if text_tokens(encode(profile)) <= limit_tokens:
             return profile
-        for key in self._PROMPT_PROFILE_LISTS:
+        for key in ("reported_facts", "recent_changes"):
             values = profile.get(key)
             if isinstance(values, list):
                 while values and text_tokens(encode(profile)) > limit_tokens:
                     values.pop()
                 if not values:
                     profile.pop(key, None)
-        for key in ("behavior", "synthesized_note"):
+        for key in self._PROMPT_FIT_ORDER:
+            values = profile.get(key)
+            if isinstance(values, list):
+                while values and text_tokens(encode(profile)) > limit_tokens:
+                    values.pop()
+                if not values:
+                    profile.pop(key, None)
+        for key in ("behavior", "synthesized_note", "aliases", "member_summary_updated_text", "member_summary"):
             if text_tokens(encode(profile)) <= limit_tokens:
                 break
             profile.pop(key, None)
@@ -1416,7 +1558,7 @@ class MemoryOrchestrator:
     def assemble_context(self, bundle: EvidenceBundle) -> dict:
         if bundle.context_projection:
             return bundle.context_projection
-        budget = max(0, min(self.settings.memory_context_token_budget, self.settings.llm_context_window_tokens - self.settings.llm_max_output_tokens - bundle.fixed_input_tokens))
+        budget = max(0, min(self.settings.memory_context_token_budget, self.settings.llm_context_window_tokens - self.settings.llm_output_reserve_tokens - bundle.fixed_input_tokens))
         # All records remain valid JSON; remove complete low-priority records under pressure.
         profiles = bundle.profiles
         emotion = bundle.emotion if self.settings.emotion_layer_enabled else {}

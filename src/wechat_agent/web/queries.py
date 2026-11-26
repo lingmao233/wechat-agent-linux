@@ -23,7 +23,7 @@ from ..storage import (
     ReplyRecordRow,
     UserProfileRow,
 )
-from ..timefmt import stamp
+from ..timefmt import short_moment_text, stamp
 
 PROFILE_FIELDS: tuple[tuple[str, str], ...] = (
     ("preferences", "偏好"),
@@ -36,6 +36,15 @@ PROFILE_FIELDS: tuple[tuple[str, str], ...] = (
     ("task_requirements", "任务要求"),
     ("corrections", "更正"),
 )
+_PROFILE_FACT_TYPES = {
+    "preferences": ("preference",),
+    "interests": ("interest",),
+    "tools": ("tool",),
+    "constraints": ("constraint",),
+    "confirmed_info": ("relation", "experience"),
+    "expression_habits": ("habit",),
+    "corrections": ("correction",),
+}
 
 SEMANTIC_FIELDS: tuple[tuple[str, str], ...] = (
     ("interests", "兴趣与话题"),
@@ -263,19 +272,71 @@ class ConsoleData:
     def event_views(self, payloads: list[dict]) -> list[dict]:
         return [self._event_view(payload) for payload in payloads if isinstance(payload, dict)]
 
-    def _profile_view(self, row: UserProfileRow | None) -> dict:
+    def _profile_view(self, row: UserProfileRow | None, *, facts: dict | None = None) -> dict:
         data = _dict(row.profile_json) if row is not None else {}
+        facts = facts or {}
+        fact_rows = [item for item in facts.get("facts") or [] if isinstance(item, dict)]
         fields = []
         for key, label in PROFILE_FIELDS:
             items = _bounded_entries(data.get(key)) if key in data else []
+            types = _PROFILE_FACT_TYPES.get(key)
+            if fact_rows and types:
+                decorated = []
+                for fact in fact_rows:
+                    if fact.get("memory_type") not in types:
+                        continue
+                    content = str(fact.get("content") or "").strip()
+                    when = self._fact_time(fact.get("observed_at"))
+                    if content:
+                        decorated.append(f"{content}（{when}）" if when else content)
+                    if len(decorated) >= 8:
+                        break
+                if decorated:
+                    items = decorated
             if items:
                 fields.append({"key": key, "label": label, "items": items})
+        summary = str(data.get("member_summary") or "").strip()
+        if summary:
+            fields.insert(0, {"key": "member_summary", "label": "当前画像", "items": [summary]})
+        changes = [
+            self._fact_line(item, unconfirmed=False)
+            for item in (facts.get("recent_changes") or [])
+            if isinstance(item, dict)
+        ][:6]
+        changes = [item for item in changes if item]
+        if changes:
+            fields.append({"key": "recent_changes", "label": "最近变化（旧说法）", "items": changes})
+        reported = [
+            self._fact_line(item)
+            for item in (facts.get("reported_facts") or [])
+            if isinstance(item, dict)
+        ][:6]
+        reported = [item for item in reported if item]
+        if reported:
+            fields.append({"key": "reported_facts", "label": "群友提到（未确认）", "items": reported})
         return {
             "fields": fields,
             "count": sum(len(field["items"]) for field in fields),
             "updated_at": self.time_text(row.updated_at) if row is not None else "",
             "raw": data,
         }
+
+    @staticmethod
+    def _fact_time(value) -> str:
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        try:
+            return short_moment_text(datetime.fromisoformat(value))
+        except ValueError:
+            return ""
+
+    def _fact_line(self, item: dict, *, unconfirmed: bool = True) -> str:
+        content = str(item.get("content") or "").strip()
+        when = self._fact_time(item.get("observed_at"))
+        if not content:
+            return ""
+        suffix = f"{when}，" if when else ""
+        return f"{content}（{suffix}{'未确认' if unconfirmed else '旧说法'}）"
 
     def _profile_preview(self, profile: dict, *, limit: int = 3) -> list[str]:
         preview: list[str] = []
@@ -523,7 +584,11 @@ class ConsoleData:
         )
         snapshot = self._snapshot(runtime, account, group, member_id)
         relationship = self._relationship_view(snapshot, member_id=member_id, member_name=member_name)
-        profile = self._profile_view(profile_row)
+        try:
+            fact_projection = self.storage.member_fact_projection(account, group, member_id)
+        except Exception:
+            fact_projection = {}
+        profile = self._profile_view(profile_row, facts=fact_projection)
         events = self.event_views(
             runtime.recent_events(
                 account,

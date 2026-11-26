@@ -31,7 +31,7 @@ import logging
 import re
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .memory_jobs import aware, encode, stable_id
 from .memory_schema import RetrievalTraceRow
@@ -59,10 +59,21 @@ WEEKLY_SYSTEM = (
     "。只写消息里出现过的事，不推测动机，不评价人品；消息不足以支撑摘要时返回空字符串。"
     "宁可输出空，不编造。"
 )
+RECONCILE_SYSTEM = (
+    "你在整理一个群成员的记忆，只返回 JSON："
+    '{"summary":"不超过180字的当前画像总结，只写仍有效的信息",'
+    '"current":[{"kind":"preference|interest|habit|experience|relation",'
+    '"content":"合并后的一句话","keep_memory_ids":["事实ID","事实ID"]}],'
+    '"supersede":[{"memory_id":"被取代的事实ID","reason":"为什么被取代","confidence":0.9}]}'
+    "。规则：只整理给定事实，不补充事实里没有的信息，不推测动机；"
+    "同一主题的新说法可以取代旧说法（supersede 旧 id）；语义重复的条目用 keep_memory_ids 合并成一条；"
+    "不同主题、可以同时成立的说法不要合并，也不要标记取代；"
+    "所有 id 只能取自给定列表；不确定就返回空数组。宁可输出空，不编造。"
+)
 
 # Summaries are derived from many messages and carry no single member; merging
 # them into each other would destroy the provenance this module exists to keep.
-_DERIVED_TYPES = ("daily_digest", "weekly_digest")
+_DERIVED_TYPES = ("daily_digest", "weekly_digest", "member_profile_summary")
 _UNMERGEABLE_TYPES = (*_DERIVED_TYPES, "chat")
 _DIGEST_CONFIDENCE = 0.7
 _MERGE_KEYS = frozenset({"content", "keep_memory_ids"})
@@ -162,7 +173,7 @@ class Digest:
     def _now(self, now: datetime | None = None) -> datetime:
         return aware(now or self.runtime.clock())
 
-    def _complete(self, system: str, payload: dict, *, max_tokens: int) -> str | None:
+    def _complete(self, system: str, payload: dict, *, max_tokens: int = 0) -> str | None:
         timeout = float(getattr(self.settings, "llm_timeout_seconds", 60.0) or 60.0)
         try:
             return self.runtime.llm.complete(
@@ -222,7 +233,7 @@ class Digest:
                 for row in bucket
             ],
         }
-        raw = self._complete(MERGE_SYSTEM, payload, max_tokens=900)
+        raw = self._complete(MERGE_SYSTEM, payload)
         if raw is None:
             return 0
         value = _parse_object(raw)
@@ -273,6 +284,9 @@ class Digest:
             if merged_id:
                 claimed |= identity
                 self._supersede(kept, merged_id, now)
+                # The ledger changed; the cached prompt/console profile must be
+                # rebuilt or it keeps showing the two old strings.
+                self.storage.rebuild_member_profile(account_id, group_id, kept[0].member_id, now=now)
                 applied += 1
         return applied
 
@@ -312,6 +326,8 @@ class Digest:
         """Close replaced facts without ever deleting a row."""
 
         with self.storage.Session.begin() as session:
+            merged = session.get(FactRow, merged_id)
+            merged_memory_id = merged.memory_id if merged is not None else ""
             for row in kept:
                 current = session.get(FactRow, row.id)
                 if current is None or current.id == merged_id:
@@ -322,6 +338,8 @@ class Digest:
                 current.valid_to = now
                 current.valid_until = now
                 current.updated_at = now
+                if merged_memory_id:
+                    current.superseded_by = merged_memory_id
 
     # ------------------------------------------------------------------ digests
     def build_digests(self, account_id: str, group_id: str, *, now: datetime | None = None) -> dict:
@@ -347,7 +365,7 @@ class Digest:
         if len(rows) < 5:
             return False
         sample = _sample(rows)
-        raw = self._complete(DAILY_SYSTEM, {"day": day.isoformat(), "messages": _payload(sample)}, max_tokens=700)
+        raw = self._complete(DAILY_SYSTEM, {"day": day.isoformat(), "messages": _payload(sample)})
         summary = self._summary(raw)
         if not summary:
             return False
@@ -376,7 +394,6 @@ class Digest:
         raw = self._complete(
             WEEKLY_SYSTEM,
             {"week": week_key, "from": first_day.isoformat(), "to": yesterday.isoformat(), "messages": _payload(sample)},
-            max_tokens=700,
         )
         summary = self._summary(raw)
         if not summary:
@@ -444,6 +461,272 @@ class Digest:
             return False
         return True
 
+    # ------------------------------------------------------------------ reconcile
+    def reconcile_members(
+        self,
+        account_id: str,
+        group_id: str,
+        *,
+        limit_members: int | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        """Per-member curation: merge, supersede contradictions, write a summary.
+
+        The model may only choose ids it was given.  Every superseded row stays
+        in the ledger with ``valid_to`` so the console/answer can show the
+        timeline; only the current projection changes.
+        """
+
+        result = {"members": 0, "merged": 0, "superseded": 0, "summaries": 0}
+        if not self._model_ready() or not getattr(self.settings, "member_reconcile_enabled", True):
+            return result
+        now = self._now(now)
+        limit = max(1, min(int(limit_members or getattr(self.settings, "member_reconcile_max_members", 5) or 5), 50))
+        today = self._local_today(now)
+        with self.storage.Session() as session:
+            rows = session.execute(
+                select(FactRow.member_id, func.max(FactRow.updated_at))
+                .where(
+                    FactRow.account_id == account_id,
+                    FactRow.group_id == group_id,
+                    FactRow.member_id != "",
+                    FactRow.status.in_(["active", "confirmed"]),
+                    FactRow.valid_until.is_(None),
+                    FactRow.attribution != "reported",
+                    FactRow.memory_type.notin_(list(_UNMERGEABLE_TYPES)),
+                )
+                .group_by(FactRow.member_id)
+                .order_by(func.max(FactRow.updated_at).desc())
+                .limit(limit * 3)
+            ).all()
+        members = [str(member_id) for member_id, _ in rows if member_id]
+        for member_id in members:
+            if result["members"] >= limit:
+                break
+            identifier = stable_id(account_id, group_id, "member_summary", member_id, today)
+            if self._digest_exists(identifier):
+                continue
+            with self.storage.Session() as session:
+                facts = list(
+                    session.scalars(
+                        select(FactRow)
+                        .where(
+                            FactRow.account_id == account_id,
+                            FactRow.group_id == group_id,
+                            FactRow.member_id == member_id,
+                            FactRow.status.in_(["active", "confirmed"]),
+                            FactRow.valid_until.is_(None),
+                            FactRow.attribution != "reported",
+                            FactRow.memory_type.notin_(list(_UNMERGEABLE_TYPES)),
+                        )
+                        .order_by(FactRow.observed_at.desc(), FactRow.id.desc())
+                        .limit(40)
+                    )
+                )
+            if len(facts) < 2:
+                continue
+            supplied = {fact.memory_id or f"fact-{fact.id}": fact for fact in facts}
+            payload = {
+                "member_id": member_id,
+                "facts": [
+                    {
+                        "memory_id": fact.memory_id or f"fact-{fact.id}",
+                        "kind": fact.memory_type,
+                        "content": fact.content[:240],
+                        "observed_at": aware(fact.observed_at).isoformat(),
+                    }
+                    for fact in facts
+                ],
+            }
+            raw = self._complete(RECONCILE_SYSTEM, payload)
+            value = _parse_object(raw)
+            if value is None:
+                continue
+            summary = self._summary_text(value.get("summary"))
+            current = self._valid_current(value.get("current"), supplied)
+            supersede = self._valid_supersede(value.get("supersede"), supplied)
+            keep_ids = {identifier for _, _, rows in current for identifier in rows}
+            supersede = [item for item in supersede if item[0] not in keep_ids]
+            if not summary and not current and not supersede:
+                continue
+            merged = self._apply_current(account_id, group_id, member_id, current, supplied, now)
+            superseded = self._apply_supersede(supersede, now)
+            source_ids = self._fact_source_ids(facts)
+            traceable_summary = summary if source_ids else ""
+            if traceable_summary:
+                summary_fact = MemoryFact(
+                    account_id=account_id,
+                    group_id=group_id,
+                    member_id=member_id,
+                    memory_type="member_profile_summary",
+                    content=traceable_summary,
+                    confidence=0.8,
+                    status="active",
+                    observed_at=now,
+                    metadata={
+                        "curation": "reconcile",
+                        "source_memory_ids": list(supplied.keys())[:40],
+                        "model": str(getattr(self.settings, "llm_model", "") or ""),
+                    },
+                    memory_id=identifier,
+                    task_id=None,
+                    source_message_ids=source_ids[:40],
+                    updated_at=now,
+                    asserted_at=now,
+                    attribution="self",
+                )
+                try:
+                    self.storage.add_scoped_memory(summary_fact)
+                    result["summaries"] += 1
+                except Exception as exc:
+                    log.warning("member summary write failed member=%s error=%s", member_id, type(exc).__name__)
+            self.storage.rebuild_member_profile(
+                account_id,
+                group_id,
+                member_id,
+                now=now,
+                summary=traceable_summary or None,
+                summary_source_ids=source_ids[:40],
+            )
+            result["members"] += 1
+            result["merged"] += merged
+            result["superseded"] += superseded
+        return result
+
+    def _summary_text(self, value) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.split())[:240]
+
+    def _valid_current(self, items, supplied: dict) -> list[tuple[str, str, list[str]]]:
+        if not isinstance(items, list):
+            return []
+        output: list[tuple[str, str, list[str]]] = []
+        claimed: set[str] = set()
+        for item in items[:8]:
+            if not isinstance(item, dict) or not set(item) <= {"kind", "content", "keep_memory_ids"}:
+                continue
+            kind = str(item.get("kind") or "").strip()
+            content = self._summary_text(item.get("content"))
+            raw_ids = item.get("keep_memory_ids")
+            if kind not in {"preference", "interest", "habit", "experience", "relation"} or not content:
+                continue
+            if not isinstance(raw_ids, list) or len(raw_ids) < 1:
+                continue
+            ids = [str(value) for value in raw_ids if isinstance(value, str)]
+            if len(ids) != len(raw_ids):
+                continue
+            ids = list(dict.fromkeys(ids))
+            if any(identifier not in supplied for identifier in ids):
+                continue
+            if claimed & set(ids):
+                continue
+            claimed |= set(ids)
+            output.append((kind, content, ids))
+        return output
+
+    def _valid_supersede(self, items, supplied: dict) -> list[tuple[str, str]]:
+        if not isinstance(items, list):
+            return []
+        output: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for item in items[:20]:
+            if not isinstance(item, dict) or not set(item) <= {"memory_id", "reason", "confidence"}:
+                continue
+            identifier = str(item.get("memory_id") or "").strip()
+            reason = self._summary_text(item.get("reason"))
+            confidence = item.get("confidence")
+            if identifier not in supplied or identifier in seen or not reason:
+                continue
+            if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                continue
+            if float(confidence) < 0.7:
+                continue
+            seen.add(identifier)
+            output.append((identifier, reason))
+        return output
+
+    def _apply_current(self, account_id, group_id, member_id, current, supplied, now: datetime) -> int:
+        """Merge groups of >=2 kept facts into one row; singletons stay as-is."""
+
+        applied = 0
+        for kind, content, ids in current:
+            rows = [supplied[identifier] for identifier in ids]
+            if len(rows) < 2:
+                continue
+            source_ids = self._fact_source_ids(rows)
+            if not source_ids:
+                continue
+            memory_id = stable_id(account_id, group_id, member_id, kind, "reconcile_merge", *sorted(ids))
+            fact = MemoryFact(
+                account_id=account_id,
+                group_id=group_id,
+                member_id=member_id,
+                memory_type=kind,
+                content=content,
+                confidence=max(float(row.confidence or 0.0) for row in rows),
+                status="active",
+                observed_at=max(aware(row.observed_at) for row in rows),
+                valid_from=min(aware(row.observed_at) for row in rows),
+                metadata={"curation": "reconcile", "merged_from": ids},
+                memory_id=memory_id,
+                task_id=None,
+                source_message_ids=source_ids,
+                updated_at=now,
+                asserted_at=max(aware(row.observed_at) for row in rows),
+                attribution="self",
+            )
+            try:
+                merged_id = self.storage.add_scoped_memory(fact)
+            except Exception as exc:
+                log.warning("reconcile merge failed member=%s error=%s", member_id, type(exc).__name__)
+                continue
+            if not merged_id:
+                continue
+            self._mark_superseded([row.id for row in rows], merged_id, now)
+            applied += 1
+        return applied
+
+    def _apply_supersede(self, items: list[tuple[str, str]], now: datetime) -> int:
+        if not items:
+            return 0
+        ids = set()
+        with self.storage.Session() as session:
+            for identifier, _reason in items:
+                row = session.scalar(select(FactRow).where(FactRow.memory_id == identifier).limit(1))
+                if row is None or row.status not in {"active", "confirmed"}:
+                    continue
+                row.status = "superseded"
+                row.valid_to = now
+                row.valid_until = now
+                row.updated_at = now
+                ids.add(row.id)
+            session.commit()
+        return len(ids)
+
+    def _mark_superseded(self, ids: list[int], merged_id: int, now: datetime) -> None:
+        with self.storage.Session.begin() as session:
+            merged = session.get(FactRow, merged_id)
+            for row_id in ids:
+                row = session.get(FactRow, row_id)
+                if row is None or row.id == merged_id or row.status not in {"active", "confirmed"}:
+                    continue
+                row.status = "superseded"
+                row.valid_to = now
+                row.valid_until = now
+                row.updated_at = now
+                if merged is not None and merged.memory_id:
+                    row.superseded_by = merged.memory_id
+
+    @staticmethod
+    def _fact_source_ids(rows) -> list[str]:
+        output: list[str] = []
+        for row in rows:
+            for source in _row_source_ids(row):
+                if source not in output:
+                    output.append(source)
+        return output[:200]
+
     # ------------------------------------------------------------------ archive
     def archive_stale(self, account_id: str, group_id: str, *, now: datetime | None = None, days: int = 120) -> int:
         """Archive decayed facts that no retrieval ever referenced."""
@@ -469,12 +752,17 @@ class Digest:
                 return 0
             referenced = self._referenced_ids(session, account_id, group_id)
             archived = 0
+            touched: set[str] = set()
             for row in rows:
                 if (row.memory_id or f"fact-{row.id}") in referenced:
                     continue
                 row.status = "archived"
                 row.updated_at = now
+                touched.add(row.member_id)
                 archived += 1
+        for member_id in touched:
+            if member_id:
+                self.storage.rebuild_member_profile(account_id, group_id, member_id, now=now)
         return archived
 
     def _referenced_ids(self, session, account_id: str, group_id: str) -> set[str]:
@@ -514,7 +802,15 @@ class Digest:
     def refresh(self, account_id: str, group_id: str, *, now: datetime | None = None) -> dict:
         """Run merge, digests and archive in order, once per local day per instance."""
 
-        summary = {"merged": 0, "daily": 0, "weekly": 0, "archived": 0}
+        summary = {
+            "merged": 0,
+            "reconciled": 0,
+            "superseded": 0,
+            "summaries": 0,
+            "daily": 0,
+            "weekly": 0,
+            "archived": 0,
+        }
         if not self._model_ready():
             return summary
         now = self._now(now)
@@ -522,6 +818,12 @@ class Digest:
         if self._should_run(account_id, group_id, "merge", day):
             summary["merged"] = self.merge_similar_facts(account_id, group_id)
             self._mark_run(account_id, group_id, "merge", day)
+        if self._should_run(account_id, group_id, "reconcile", day):
+            reconciled = self.reconcile_members(account_id, group_id, now=now)
+            summary["reconciled"] = reconciled["members"]
+            summary["superseded"] = reconciled["superseded"]
+            summary["summaries"] = reconciled["summaries"]
+            self._mark_run(account_id, group_id, "reconcile", day)
         if self._should_run(account_id, group_id, "digests", day):
             summary.update(self.build_digests(account_id, group_id, now=now))
             self._mark_run(account_id, group_id, "digests", day)

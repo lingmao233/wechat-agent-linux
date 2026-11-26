@@ -11,14 +11,147 @@ window.  No keyword table lives here any more.
 
 import re
 
+from . import homophones
+from .identity import bot_names
 from .judge import Judge, Judgement
 from .models import MessageEvent
 from .social import EVENT_TYPES, SocialEventCandidate
 
 __all__ = ["EVENT_TYPES", "analyze", "analyze_events", "bound", "bound_target"]
 
+_TRAILING_PUNCTUATION = " \t\r\n，,。！？!?；;：:、…~～"
 
-def bound_target(candidate: SocialEventCandidate, event: MessageEvent, aliases) -> SocialEventCandidate:
+
+def _exact_prefix(value: str, names) -> str:
+    folded = value.casefold()
+    return max(
+        (name for name in names if folded.startswith(name.casefold())),
+        key=len,
+        default="",
+    )
+
+
+def _homophone_prefix(value: str, names) -> str:
+    """The typed text when a name is an opening homophone (``小宇`` for ``小鱼``)."""
+
+    best = ""
+    for name in names:
+        if len(name) < 2 or not homophones.has_cjk(name):
+            continue
+        for start, end in homophones.find_homophone_spans(value, name):
+            if start == 0 and end > len(best):
+                best = value[:end]
+    return best
+
+
+def _exact_suffix(value: str, names) -> str:
+    folded = value.casefold()
+    return max(
+        (name for name in names if folded.endswith(name.casefold())),
+        key=len,
+        default="",
+    )
+
+
+def _homophone_suffix(value: str, names) -> str:
+    """The typed text when a name closes the sentence as a homophone vocative."""
+
+    best = ""
+    for name in names:
+        if len(name) < 2 or not homophones.has_cjk(name):
+            continue
+        for start, end in homophones.find_homophone_spans(value, name):
+            if end != len(value) or start == 0:
+                continue
+            if value[start - 1] not in "，,。！？!?；;：:、 \u2005":
+                continue
+            if end - start > len(best):
+                best = value[start:end]
+    return best
+
+
+def _exact_suffix_person(value: str, names) -> str:
+    """An exact member suffix only counts when it follows punctuation."""
+
+    best = ""
+    for name in names:
+        if not value.casefold().endswith(name.casefold()):
+            continue
+        prefix = value[: -len(name)].rstrip()
+        if prefix and prefix[-1] in "，,。！？!?；;：:、 \u2005" and len(name) > len(best):
+            best = name
+    return best
+
+
+def _named_person(
+    exact_bot: str,
+    exact_person: str,
+    homo_bot: str,
+    homo_person: str,
+) -> str:
+    """Pick the longest vocative; exact text beats a homophone and the bot wins ties."""
+
+    length, exact, is_bot, name = max(
+        (len(exact_bot), 2, 1, exact_bot),
+        (len(exact_person), 2, 0, exact_person),
+        (len(homo_bot), 1, 1, homo_bot),
+        (len(homo_person), 1, 0, homo_person),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    if not name or is_bot:
+        return ""
+    return name
+
+
+def _addresses_member(text: str, member_names, aliases) -> str:
+    """Return the member name this sentence opens (or closes) by calling.
+
+    WeChat users often omit ``@`` and the comma: ``测试成员4你能不能滚`` is a
+    vocative, not prose, and pinyin input turns the bot's own name into a
+    homophone (``小鱼`` → ``小宇``, ``肥鱼`` → ``飞鱼``).  Matching is
+    longest-name-first; exact text beats a homophone, a real member's exact
+    name beats the bot's homophone, and the bot wins ties.  That keeps
+    ``小鱼 我说的是测试成员4`` a message to the bot while ``小宇`` is not silently
+    treated as a different person.
+    """
+
+    value = str(text or "").strip().lstrip("@\u2005 ").strip()
+    if not value:
+        return ""
+    bot_keys = {str(name).strip() for name in aliases if str(name).strip()}
+    people = {
+        str(name).strip()
+        for name in member_names
+        if len(str(name).strip()) >= 2
+    }
+    opening = _named_person(
+        _exact_prefix(value, bot_keys),
+        _exact_prefix(value, people),
+        _homophone_prefix(value, bot_keys),
+        _homophone_prefix(value, people),
+    )
+    if opening:
+        return opening
+
+    # ``你能不能滚，测试成员4`` is the same vocative at the other end.  A member
+    # name needs punctuation before it so ``我最喜欢测试成员4`` stays prose; the bot
+    # name only suppresses the downgrade.
+    tail = value.rstrip(_TRAILING_PUNCTUATION)
+    closing = _named_person(
+        _exact_suffix(tail, bot_keys),
+        _exact_suffix_person(tail, people),
+        _homophone_suffix(tail, bot_keys),
+        _homophone_suffix(tail, people),
+    )
+    return closing
+
+
+def bound_target(
+    candidate: SocialEventCandidate,
+    event: MessageEvent,
+    aliases,
+    member_names=(),
+) -> SocialEventCandidate:
     """Downgrade an AI target when the message clearly points at someone else."""
 
     known = {alias.strip().casefold() for alias in aliases if alias and alias.strip()}
@@ -33,10 +166,17 @@ def bound_target(candidate: SocialEventCandidate, event: MessageEvent, aliases) 
         )
     )
     addresses_ai = any(alias and alias in event.text for alias in aliases)
-    if candidate.target_type == "ai" and (other_mentions or (other_quote and not addresses_ai)):
+    named_member = _addresses_member(event.text, member_names, aliases)
+    if candidate.target_type == "ai" and (
+        other_mentions or named_member or (other_quote and not addresses_ai)
+    ):
         candidate.confidence = min(candidate.confidence, 0.65)
-        candidate.target_type, candidate.target_key = "unknown", "unknown"
-        candidate.metadata = {**candidate.metadata, "target_downgraded": "ambiguous_or_other_target"}
+        candidate.target_type = "member" if named_member else "unknown"
+        candidate.target_key = "unknown"
+        candidate.metadata = {
+            **candidate.metadata,
+            "target_downgraded": "named_member" if named_member else "ambiguous_or_other_target",
+        }
     if not event.member_id:
         candidate.confidence = min(candidate.confidence, 0.7)
     return candidate
@@ -73,16 +213,16 @@ def _correction(item, event: MessageEvent, context) -> dict | None:
     return change
 
 
-def bound(event: MessageEvent, judgement: Judgement, settings, *, context=()) -> Judgement:
+def bound(event: MessageEvent, judgement: Judgement, settings, *, context=(), member_names=()) -> Judgement:
     """Apply the checks that must stay in code to an already-read message."""
 
-    aliases = [*settings.wechat_ai_aliases, settings.wechat_self_name, settings.persona_name]
+    aliases = bot_names(settings)
     window = list(context)[-6:]
     kept: list[SocialEventCandidate] = []
     for candidate in judgement.events:
         if candidate.evidence_excerpt and candidate.evidence_excerpt not in event.text:
             continue
-        candidate = bound_target(candidate, event, aliases)
+        candidate = bound_target(candidate, event, aliases, member_names=member_names)
         if candidate.event_type == "correction":
             correction = _correction(candidate, event, window)
             if correction is None:
@@ -93,7 +233,14 @@ def bound(event: MessageEvent, judgement: Judgement, settings, *, context=()) ->
     return judgement
 
 
-def analyze(event: MessageEvent | None, *, context=(), settings, judge: Judge | None = None) -> Judgement:
+def analyze(
+    event: MessageEvent | None,
+    *,
+    context=(),
+    settings,
+    judge: Judge | None = None,
+    member_names=(),
+) -> Judgement:
     """Run one judgement and keep only what storage may safely use."""
 
     if event is None or event.is_self or event.source_role != "human":
@@ -102,12 +249,19 @@ def analyze(event: MessageEvent | None, *, context=(), settings, judge: Judge | 
         return Judgement(reason="no_judge")
     if not settings.memory_event_extraction_enabled:
         return Judgement(reason="extraction_disabled")
-    judgement = judge.analyze(event, context)
-    return bound(event, judgement, settings, context=context)
+    judgement = judge.analyze(event, context, members=member_names)
+    return bound(event, judgement, settings, context=context, member_names=member_names)
 
 
-def analyze_events(event: MessageEvent, judgement: Judgement, settings, *, context=()) -> list[SocialEventCandidate]:
+def analyze_events(
+    event: MessageEvent,
+    judgement: Judgement,
+    settings,
+    *,
+    context=(),
+    member_names=(),
+) -> list[SocialEventCandidate]:
     """Bound a judgement that came from a batched call."""
 
-    return bound(event, judgement, settings, context=context).events
+    return bound(event, judgement, settings, context=context, member_names=member_names).events
 

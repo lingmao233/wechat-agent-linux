@@ -13,9 +13,10 @@ from sqlalchemy import delete, func, or_, select
 
 from .emotion import EmotionEngine
 from .event_memory import analyze, analyze_events
+from .identity import bot_names, human_member_names
 from .judge import Judge, Judgement
 from .memory_jobs import BACKOFF, MemoryWorker, aware, encode, event_from_row, scope_transaction, stable_id
-from .memory_schema import AnalysisJobRow, DiscussionSegmentRow, EmotionCheckpointRow, EmotionEventRow, EpisodeRow, LifecycleRow, ListenerHealthRow, RelationshipEffectRow, RelationshipStateRow, RetrievalTraceRow
+from .memory_schema import AnalysisJobRow, DiscussionSegmentRow, EmotionCheckpointRow, EmotionEventRow, EpisodeRow, LifecycleRow, ListenerHealthRow, MemberAliasRow, RelationshipEffectRow, RelationshipStateRow, RetrievalTraceRow
 from .models import MessageEvent, utc_now
 from .storage import AIProfileRow, FactRow, MessageRow
 
@@ -75,11 +76,24 @@ class MemoryRuntime:
             judgement = None
             deferred_until = None
             unjudgeable = False
+            member_names: list[str] = []
+            member_directory: list[dict] = []
             if event and self.settings.memory_event_extraction_enabled:
-                outcome = self._take_judgement(event, context, now, allow_model=allow_model)
+                member_names = self.recent_member_names(event.account_id, event.group_id)
+                member_directory = self.recent_member_directory(event.account_id, event.group_id)
+                outcome = self._take_judgement(
+                    event,
+                    context,
+                    now,
+                    allow_model=allow_model,
+                    members=member_names,
+                    member_directory=member_directory,
+                )
                 if isinstance(outcome, Judgement):
                     judgement = outcome
-                    candidates = analyze_events(event, judgement, self.settings, context=context)
+                    candidates = analyze_events(
+                        event, judgement, self.settings, context=context, member_names=member_names
+                    )
                 elif outcome == "budget":
                     # Over the day's budget: keep the job pending until the
                     # next local midnight instead of dropping the message.
@@ -166,7 +180,7 @@ class MemoryRuntime:
     def _judge_key(event: MessageEvent) -> tuple[str, str, str]:
         return (event.account_id, event.group_id, str(event.external_message_id or event.ingest_sequence or ""))
 
-    def _take_judgement(self, event: MessageEvent, context, now: datetime, *, allow_model: bool):
+    def _take_judgement(self, event: MessageEvent, context, now: datetime, *, allow_model: bool, members=(), member_directory=()):
         """One judgement for this message: cache, batch, single call, or a reason."""
 
         if not allow_model:
@@ -186,7 +200,7 @@ class MemoryRuntime:
             return "budget"
         batch = self._batch_ready(event, context)
         if len(batch) > 1:
-            results = self.judge.analyze_many(batch)
+            results = self.judge.analyze_many(batch, members=members, member_directory=member_directory)
             for item_key, item in results.items():
                 self._judgements[(event.account_id, event.group_id, item_key)] = item
             cached = self._judgements.pop(key, None)
@@ -194,7 +208,7 @@ class MemoryRuntime:
                 return cached
             log.warning("judge batch omitted message_id=%s", key[2])
         # No batch, or the batch skipped this message: judge it on its own.
-        return self.judge.analyze(event, context)
+        return self.judge.analyze(event, context, members=members, member_directory=member_directory)
 
     def _batch_ready(self, event: MessageEvent, context) -> list[tuple[MessageEvent, list, str]]:
         """The current message plus nearby plain-text jobs ready right now."""
@@ -283,6 +297,51 @@ class MemoryRuntime:
                 messages.append(ConversationMessage(sender_name=row.member_name, sender_id=row.member_id, text=text, message_id=row.external_message_id or str(row.id), observed_at=aware(row.source_created_at or row.observed_at), image_paths=json.loads(row.image_paths_json), source_role="assistant" if row.is_self else row.source_role, reply_to_sender=row.reply_to_sender or "", reply_to_text=(row.reply_to_text or "")[:200]))
                 used += len(text)
             return list(reversed(messages))
+
+    def recent_member_names(self, account_id: str, group_id: str, *, limit: int = 400) -> list[str]:
+        """The humans this group has spoken to recently, minus the bot itself.
+
+        The event judge needs the roster to resolve a bare vocative
+        (``测试成员4你能不能滚``) without an ``@``.  Four hundred recent rows keep one
+        query per analysis job and still cover every active speaker; names are
+        deduplicated and capped by ``human_member_names``.
+        """
+
+        with self.storage.Session() as session:
+            rows = session.execute(
+                select(MessageRow.member_name)
+                .where(
+                    MessageRow.account_id == account_id,
+                    MessageRow.group_id == group_id,
+                    MessageRow.lifecycle_status == "active",
+                    MessageRow.is_self.is_(False),
+                    MessageRow.member_id != account_id,
+                )
+                .order_by(MessageRow.id.desc())
+                .limit(limit)
+            ).all()
+        names = human_member_names(self.settings, (name for (name,) in rows))
+        # Aliases are people's names too: a judge that only sees the current
+        # display name fails on "测试成员11"/"czx" and can misread a member name as
+        # the bot's.  Stable ids stay in member_directory; this list is only for
+        # "is this a human name" checks.
+        bot_keys = {name.casefold() for name in bot_names(self.settings)}
+        for entries in self.storage.member_aliases(account_id, group_id).values():
+            for entry in entries:
+                alias = str(entry.get("alias") or "").strip()
+                if alias and alias.casefold() not in bot_keys and alias not in names:
+                    names.append(alias)
+        return names[:80]
+
+    def recent_member_directory(self, account_id: str, group_id: str, *, limit: int = 50) -> list[dict]:
+        """Stable id + display name + aliases for subject attribution.
+
+        The judge may only name a subject that the server actually supplied;
+        aliases are included so it can recognise "测试成员11"/"czx" as the member
+        whose display name is something else.
+        """
+
+        return self.storage.member_directory(account_id, group_id, limit=limit)
 
     def recent_events(self, account_id: str, group_id: str, *, member_id: str = "", event_types=(), since: datetime | None = None, until: datetime | None = None, watermark: int | None = None, limit: int = 50, include_candidates: bool = True, include_inactive: bool = False) -> list[dict]:
         with self.storage.Session() as session:
@@ -390,13 +449,17 @@ class MemoryRuntime:
             output = []
             for (account, group), (name, watermark, count) in sorted(scopes.items()):
                 analysis = dict(session.execute(select(AnalysisJobRow.status, func.count()).where(AnalysisJobRow.account_id == account, AnalysisJobRow.group_id == group).group_by(AnalysisJobRow.status)).all())
+                aliases = session.scalar(select(func.count()).select_from(MemberAliasRow).where(MemberAliasRow.account_id == account, MemberAliasRow.group_id == group)) or 0
                 output.append({"account_id": account, "group_id": group, "group_name": name,
                     "message_watermark": watermark, "message_count": count, "analysis": analysis,
                     "index": self.storage.index_status(account, group),
+                    "alias_count": int(aliases),
                     "degraded": bool(analysis.get("failed")),
                     "features": {"retrieval": self.settings.memory_orchestrator_enabled,
                         "event_extraction": self.settings.memory_event_extraction_enabled,
-                        "semantic_profile": self.settings.semantic_group_profile_enabled}})
+                        "semantic_profile": self.settings.semantic_group_profile_enabled,
+                        "member_reconcile": self.settings.member_reconcile_enabled,
+                        "member_alias_learning": self.settings.member_alias_learning_enabled}})
             return output
 
     def save_trace(self, bundle) -> None:
@@ -479,12 +542,30 @@ class MemoryRuntime:
                 profiles.refresh(account, group)
             self.checkpoint(account, group, now=now)
             self.prune_emotion_audit(account, group, now=now)
+            if self.settings.member_alias_learning_enabled:
+                # Manual aliases must apply immediately after a settings reload,
+                # not only inside the once-a-day curation block.
+                try:
+                    from .aliases import alias_service
+
+                    alias_service(self).sync_config(account, group)
+                except Exception as exc:
+                    log.warning("member alias config sync failed group=%s error=%s", group, type(exc).__name__)
             if self._daily_due((account, group), day):
                 # One pass per local day: a finished day's timeline is stable,
                 # relations are a weekly aggregate and digests merge facts.
                 timeline = narrative.refresh_timeline(account, group, day=yesterday)
                 relations = narrative.refresh_relations(account, group, days=7)
                 digest.refresh(account, group, now=now)
+                if self.settings.member_alias_learning_enabled and self.settings.memory_event_extraction_enabled:
+                    try:
+                        from .aliases import alias_service
+
+                        service = alias_service(self)
+                        service.sync_nicknames(account, group)
+                        service.discover(account, group)
+                    except Exception as exc:
+                        log.warning("member alias maintenance failed group=%s error=%s", group, type(exc).__name__)
                 model_waiting = bool(self.llm and self.settings.llm_api_key)
                 if not model_waiting or timeline is not None or relations:
                     self._daily_mark((account, group), day)

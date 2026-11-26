@@ -1,0 +1,130 @@
+Metadata-Version: 2.4
+Name: wechat-agent-linux
+Version: 0.2.0
+Summary: Linux WeChat agent with scoped evidence, persistent relationships and verified delivery
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: comtypes>=1.4.0; sys_platform == "win32"
+Requires-Dist: cryptography>=42.0.0
+Requires-Dist: Pillow>=10.0.0
+Requires-Dist: imageio-ffmpeg>=0.6.0
+Requires-Dist: zstandard>=0.22.0
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: pydantic-settings>=2.2.1
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: pyperclip>=1.8.2
+Requires-Dist: SQLAlchemy>=2.0.0
+Requires-Dist: psycopg[binary]>=3.2.0
+Requires-Dist: pgvector>=0.3.0
+Requires-Dist: alibabacloud-oss-v2==1.4.0
+Requires-Dist: wechatauto-replica==1.2.7.0; sys_platform == "win32"
+Requires-Dist: uiautomation>=2.0.18; sys_platform == "win32"
+Requires-Dist: playwright>=1.48.0
+Provides-Extra: test
+Requires-Dist: pytest>=8.0.0; extra == "test"
+
+# 微信群聊 Agent · Linux
+
+以 Windows 仓库 `lingmao233/wechat-agent-windows` 的 `45333d608c1f656a7861f5278b5cf82aca568081` 为基线，保留聊天、人设、生图、联网研究、控制台和策略层，增加 Linux 平台适配与记忆、上下文、情绪运行时。
+
+Linux 通过本地 SQLCipher 数据库读取消息，通过 AT-SPI / X11 操作微信。发送结果必须有数据库回读凭据；原文、群事件、长期画像、情绪和成员关系分别保存，并使用稳定账号、群、成员 ID 隔离。
+
+当前开发与实机验收状态见 [STATUS.md](STATUS.md)；逐项证据与未达到的指标见 [验收记录](docs/ACCEPTANCE.md)。
+
+完整部署使用 `dist/wechat_agent_linux-0.2.0.tar.gz` 源码包，包含文档、安装脚本、迁移和人设。另有 Python wheel；单独安装 wheel 时，需另外准备图形会话和人设配置，并设置 `PERSONA_FILE` 指向人设文件。
+
+## 安装与启动
+
+参考环境为 Ubuntu 24.04 / WSL2 + WSLg，Python 3.11+，Linux 微信 4.1.x。发送需要可用的图形会话。
+
+```bash
+bash scripts/setup-linux.sh
+```
+
+脚本安装 AT-SPI、D-Bus、X11 工具及 Python 依赖，创建带系统包的 Linux venv，并在 `.env` 不存在时复制 `.env.linux.example`。已有 `.env` 会保留。
+
+如果当前目录中已有 Windows `.venv`，使用另一个 Linux 路径：
+
+```bash
+export WECHAT_VENV_DIR="$HOME/.venvs/wechat-agent-linux"
+bash scripts/setup-linux.sh
+export WECHAT_PYTHON="$WECHAT_VENV_DIR/bin/python"
+```
+
+在 `.env` 中设置账号目录和明确的群映射：
+
+```dotenv
+WECHAT_PLATFORM=linux
+WECHAT_LINUX_DATA_DIR=/home/your-user/xwechat_files/wxid_example_suffix
+WECHAT_ACCOUNT_ID=wxid_example
+WECHAT_GROUP_NAMES=测试群
+WECHAT_LINUX_CHAT_IDS='{"测试群":"12345678@chatroom"}'
+WECHAT_ALLOW_SEND=false
+```
+
+微信未运行时，在图形会话的终端中启动它：
+
+```bash
+bash scripts/launch-wechat.sh
+```
+
+保留该启动进程，在另一个终端启动 Agent：
+
+```bash
+source scripts/linux-session.sh
+${WECHAT_PYTHON:-.venv/bin/python} -m wechat_agent keyscan
+${WECHAT_PYTHON:-.venv/bin/python} -m wechat_agent ready
+bash scripts/start-linux.sh desktop
+```
+
+控制台默认地址为 `http://127.0.0.1:8765`。`keyscan` 只扫描并验证密钥；微信原始数据库保持只读。权限不足的处理、独立会话和 WSLg 说明见 [Linux 部署](docs/DEPLOYMENT-LINUX.md)。
+
+## 复用现有配置
+
+LLM、OpenViking、Embedding、生图和人设配置沿用 Windows 配置。Linux 必需变更为数据路径、平台、账号及群 ID 映射。
+
+按本次用户要求，工作区根 `.env` 已复用本地 Windows 配置；`VISION_BASE_URL`、`VISION_API_KEY`、`VISION_MODEL` 留空，视觉调用使用同一个 LLM。真实配置被 Git 和发行包排除。
+
+复制配置也会保留原发送和主动发言开关。本次没有用根 `.env` 启动常驻自动回复；实机检查使用隔离配置，仅在测试进程中临时允许发送。
+
+## 记忆与情绪
+
+| 开关 | 能力 |
+|---|---|
+| `MEMORY_EVENT_EXTRACTION_ENABLED` | 异步提取有原文来源的群事件 |
+| `MEMORY_ORCHESTRATOR_ENABLED` | 按问题规划检索、合并证据、约束上下文预算 |
+| `SEMANTIC_GROUP_PROFILE_ENABLED` | 分讨论片段生成群兴趣、表达习惯、氛围和群梗 |
+| `EMOTION_LAYER_ENABLED` | 每群 PAD、按成员好感、衰减、修复和撤销 |
+| `PROACTIVE_SCHEDULE_ENABLED` | 每群持久参与窗口、租约和额度 |
+
+这些新开关默认关闭以支持分阶段启用。开启新的主动调度后，旧概率入口会被关闭；正常问题仍走发送闸门。启用顺序和回滚见 [记忆运行时](docs/MEMORY-RUNTIME.md)。
+
+## 检查与验收
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ${WECHAT_PYTHON:-.venv/bin/python} -m pytest -q
+${WECHAT_PYTHON:-.venv/bin/python} -m compileall -q src scripts
+${WECHAT_PYTHON:-.venv/bin/python} -m wechat_agent memory-status
+```
+
+普通测试使用临时数据库，隔离真实 `.env`，不发送微信消息。连续实发是显式运行的独立脚本，例如在已加入白名单的文件传输助手中：
+
+```bash
+${WECHAT_PYTHON:-.venv/bin/python} scripts/accept-linux.py \
+  --config /private/acceptance.env --chat 'File Transfer' \
+  --kind text --count 50 --allow-send --out state/acceptance/text-50.json
+```
+
+该脚本遵守 STOP 和频率限制，保存回读凭据的摘要，遇到未知结果即停止，不自动重发。具体用法见 [验收记录](docs/ACCEPTANCE.md)。
+
+## 交付文档
+
+- [Linux 部署、会话与配置](docs/DEPLOYMENT-LINUX.md)
+- [Linux 重构方案与边界](docs/LINUX-REFACTOR.md)
+- [记忆、上下文、情绪与调度](docs/MEMORY-RUNTIME.md)
+- [FR / AC 验收映射与证据](docs/ACCEPTANCE.md)
+- [Linux PRD](docs/PRD-LINUX.md) / [记忆与情绪 PRD](docs/PRD-MEMORY-CONTEXT-EMOTION.md)
+
+原 Windows 文档和适配器保留在仓库中；Linux 部署以本页及 `DEPLOYMENT-LINUX.md` 为入口。

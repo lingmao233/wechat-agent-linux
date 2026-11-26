@@ -257,8 +257,11 @@ class VisionClient:
         payload = {
             "model": settings.vision_model or settings.llm_model,
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}}]}],
-            "max_tokens": 2000 if panel else 300,
         }
+        # No fixed allowance: a reasoning model spends a small budget on thinking
+        # and then returns truncated or empty JSON for the observation.
+        if settings.llm_max_output_tokens:
+            payload["max_tokens"] = settings.llm_max_output_tokens
         # A catalog describes up to twenty cells once; ordinary incoming GIFs
         # still share the ten-second end-to-end observation deadline.
         request_timeout = timeout if timeout is not None else (30 if panel else settings.sticker_timeout_seconds)

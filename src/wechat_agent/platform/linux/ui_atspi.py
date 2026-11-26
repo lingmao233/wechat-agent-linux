@@ -130,6 +130,16 @@ class AtspiUI:
 
     def focus(self) -> None:
         window = self._main_window()
+        # Make the window's workspace current first.  Calling windowmap on a
+        # window that lives on another Xfce workspace can return a transient
+        # xdotool failure even though the window is healthy.
+        try:
+            desktop = self._command(["xprop", "-id", window, "_NET_WM_DESKTOP"])
+            match = re.search(r"=\s*(\d+)\s*$", desktop)
+            if match:
+                self._command(["xdotool", "set_desktop", match.group(1)])
+        except BackendError:
+            pass
         # A minimized window is still the same logged-in client. Restore only
         # its verified main window, rather than selecting a picture viewer.
         self._command(["xdotool", "windowmap", "--sync", window])
@@ -137,12 +147,83 @@ class AtspiUI:
         self._command(["xdotool", "windowactivate", "--sync", window])
         self._command(["xdotool", "windowfocus", "--sync", window])
         self._window_id = window
+        # A Douyin card can open an external-protocol "打开方式" window; it is
+        # modal and blocks every WeChat click.  Close only that dialog.
+        self._close_external_protocol_dialogs()
         # WeChat 4.x opens its global search/搜一搜 results in a separate
         # always-on-top window.  A stale one (for example left behind by the
         # optional voice-cache flush) covers the chat list: AT-SPI coordinates
         # are then clicked on the wrong window and every send fails header
         # verification.  Close only those auxiliary search windows.
         self._close_search_overlays()
+        self._ensure_wechat_front()
+
+    def _wechat_frame_visible(self) -> bool:
+        for node in self._nodes(self.app):
+            try:
+                if node.getRoleName() == "frame" and (node.name or "").strip() in {"微信", "WeChat", "wechat"} and self._visible(node):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _ensure_wechat_front(self) -> None:
+        """Raise WeChat above a visible Douyin Chrome window.
+
+        Xfwm sometimes leaves a large Chrome window above an activated WeChat
+        window.  AT-SPI then reports no visible chat list, so every bridge
+        delivery fails with CHAT_NOT_VISIBLE.  Minimizing only the Douyin
+        browser (never a terminal or an unrelated window) restores the chat
+        list; the Playwright page keeps working while minimized.
+        """
+
+        active = ""
+        try:
+            active = self._command(["xdotool", "getactivewindow", "getwindowname"]).strip()
+        except BackendError:
+            pass
+        # Xfwm can report WeChat as active while a large Chrome window still
+        # covers it, so do not trust the active title alone: minimize the
+        # Douyin browser before any list search / click.
+        try:
+            for window in self._command(["xdotool", "search", "--name", "Google Chrome"]).splitlines():
+                window = window.strip()
+                if not window:
+                    continue
+                try:
+                    title = self._command(["xdotool", "getwindowname", window]).strip()
+                except BackendError:
+                    continue
+                if "抖音" in title or "douyin" in title.casefold() or "Chrome" in title:
+                    try:
+                        self._command(["xdotool", "windowminimize", window])
+                    except BackendError:
+                        pass
+        except BackendError:
+            pass
+        window = self._main_window()
+        self._command(["xdotool", "windowmap", "--sync", window])
+        self._command(["xdotool", "windowactivate", "--sync", window])
+        self._command(["xdotool", "windowraise", window])
+
+    def _close_external_protocol_dialogs(self) -> None:
+        for title in ("打开方式", "Open With", "打开方式…"):
+            try:
+                for window in self._command(["xdotool", "search", "--name", title]).splitlines():
+                    window = window.strip()
+                    if window:
+                        try:
+                            title_text = self._command(["xdotool", "getwindowname", window])
+                        except BackendError:
+                            continue
+                        if "打开方式" not in title_text and "Open With" not in title_text:
+                            continue
+                        try:
+                            self._command(["xdotool", "windowclose", window])
+                        except BackendError:
+                            continue
+            except BackendError:
+                continue
 
     def _close_search_overlays(self) -> None:
         candidates: list[tuple[str, bool]] = []
@@ -183,34 +264,127 @@ class AtspiUI:
     def open_chat(self, chat: ChatInfo, *, allow_search: bool = True) -> None:
         if self.app is None:
             self.connect()
-        self.focus()
-        candidates = []
-        for node in self._nodes():
-            try:
-                label = (node.name or "").split("\n", 1)[0].strip()
-                parent = node.parent
-                if node.getRoleName() == "list item" and self._visible(node) and label == chat.name and parent and parent.getRoleName() == "list" and (parent.name or "").strip() in {"Chats", "聊天", "会话"}:
-                    candidates.append(node)
-            except Exception:
-                continue
-        if not candidates:
-            if not allow_search:
-                raise BackendError("CHAT_NOT_VISIBLE", "目标会话不在微信 Chats 列表中；本次不打开全局搜索")
-            candidates = self._search_chat_candidates(chat)
-        if len(candidates) != 1:
-            if not candidates:
-                raise BackendError("CHAT_NOT_VISIBLE", "目标会话不在微信 Chats 列表中，且微信搜索未找到唯一联系人")
-            raise BackendError("CHAT_AMBIGUOUS", "微信中有多个同名目标，已停止发送")
-        # This Linux build toggles the conversation closed when its selected
-        # sidebar row is clicked again. Read the actual header before clicking.
-        if not self._chat_header_matches(chat.name):
+        for attempt in range(2):
+            self.focus()
+            candidates = self._sidebar_chat_candidates(chat.name)
+            if not candidates and allow_search:
+                # Fast path for chats that are not in the rendered sidebar window:
+                # WeChat's global search returns exact contacts under 联系人.
+                candidates = self._search_chat_candidates(chat)
+            if not candidates and allow_search:
+                # Search may be unavailable/slow on some builds; fall back to
+                # scrolling the sidebar through older conversations.
+                candidates = self._scroll_sidebar_for_chat(chat.name)
+            if len(candidates) != 1:
+                if not candidates:
+                    raise BackendError("CHAT_NOT_VISIBLE", "目标会话不在微信 Chats 列表中，且微信搜索未找到唯一联系人")
+                raise BackendError("CHAT_AMBIGUOUS", "微信中有多个同名目标，已停止发送")
+            # This Linux build toggles the conversation closed when its selected
+            # sidebar row is clicked again. Read the actual header before clicking.
+            if self._chat_header_matches(chat.name):
+                self.active_chat = chat.chat_id
+                return
             self._click(candidates[0])
             deadline = time.monotonic() + 2
             while not self._chat_header_matches(chat.name):
                 if time.monotonic() >= deadline:
-                    raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "无法核实当前会话标题，已停止发送并保留诊断截图")
+                    break
                 time.sleep(0.05)
-        self.active_chat = chat.chat_id
+            if self._chat_header_matches(chat.name):
+                self.active_chat = chat.chat_id
+                return
+            if attempt == 0:
+                # A stale search overlay or a reordered sidebar can make the
+                # first click select the wrong row. Refocus and re-resolve once
+                # before giving up; never send to an unverified header.
+                time.sleep(0.3)
+                continue
+            raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "无法核实当前会话标题，已停止发送并保留诊断截图")
+
+    def _sidebar_chat_candidates(self, name: str) -> list[object]:
+        """Exact-name list items currently rendered in the Chats sidebar."""
+
+        target = str(name or "").strip()
+        matches: list[object] = []
+        if not target:
+            return matches
+        for node in self._nodes():
+            try:
+                label = (node.name or "").split("\n", 1)[0].strip()
+                parent = node.parent
+                if (node.getRoleName() == "list item" and self._visible(node)
+                        and label == target and parent and parent.getRoleName() == "list"
+                        and (parent.name or "").strip() in {"Chats", "聊天", "会话"}):
+                    matches.append(node)
+            except Exception:
+                continue
+        return matches
+
+    def _sidebar_list_node(self):
+        for node in self._nodes():
+            try:
+                if (node.getRoleName() == "list" and self._visible(node)
+                        and (node.name or "").strip() in {"Chats", "聊天", "会话"}):
+                    return node
+            except Exception:
+                continue
+        return None
+
+    def _scroll_sidebar(self, clicks: int) -> bool:
+        """Wheel the Chat sidebar; positive scrolls down, negative scrolls up."""
+
+        list_node = self._sidebar_list_node()
+        if list_node is None or not clicks:
+            return False
+        try:
+            x, y, width, height = list_node.queryComponent().getExtents(self.atspi.DESKTOP_COORDS)
+            if min(width, height) <= 0:
+                return False
+            self._command([
+                "xdotool", "mousemove",
+                str(x + width // 2), str(y + height // 2),
+                "click", "--repeat", str(abs(int(clicks))), "5" if clicks > 0 else "4",
+            ])
+            time.sleep(0.25)
+            return True
+        except Exception:
+            return False
+
+    def _scroll_sidebar_for_chat(self, name: str, *, step: int = 6) -> list[object]:
+        """Scroll the sidebar looking for ``name``; returns exact matches."""
+
+        found = self._sidebar_chat_candidates(name)
+        if found:
+            return found
+        # Start from the top so a chat above the current viewport is not missed.
+        for _ in range(10):
+            if not self._scroll_sidebar(-10):
+                return []
+        previous: set[str] | None = None
+        for _ in range(8):
+            labels: set[str] = set()
+            try:
+                for node in self._nodes():
+                    try:
+                        if (node.getRoleName() == "list item" and self._visible(node)
+                                and node.parent is not None
+                                and node.parent.getRoleName() == "list"
+                                and (node.parent.name or "").strip() in {"Chats", "聊天", "会话"}):
+                            labels.add((node.name or "").split("\n", 1)[0].strip())
+                    except Exception:
+                        continue
+            except Exception:
+                labels = set()
+            found = self._sidebar_chat_candidates(name)
+            if found:
+                return found
+            if labels and labels == previous:
+                break  # reached the end of the list
+            previous = labels or previous
+            if not self._scroll_sidebar(step):
+                break
+        return []
+
 
     def _search_box(self):
         """Return the visible global search entry, if the client exposes one."""
@@ -304,7 +478,7 @@ class AtspiUI:
                            "--clearmodifiers", "ctrl+a"])
             self._command(["xdotool", "type", "--window", self._window_id,
                            "--clearmodifiers", "--delay", "20", str(query)])
-            deadline = time.monotonic() + 1.5
+            deadline = time.monotonic() + 4.0
             while time.monotonic() < deadline:
                 candidates = self._contact_search_candidates(chat.name)
                 if len(candidates) > 1:
@@ -344,6 +518,14 @@ class AtspiUI:
             if matches(node):
                 self._chat_header = node
                 return True
+        return False
+
+    def _wait_chat_header(self, name: str, timeout: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._chat_header_matches(name):
+                return True
+            time.sleep(0.1)
         return False
 
     def _input(self):
@@ -427,7 +609,10 @@ class AtspiUI:
         import io
         with Image.open(path) as image:
             output = io.BytesIO()
-            image.convert("RGB").save(output, format="PNG")
+            frame = image.convert("RGBA")
+            background = Image.new("RGBA", frame.size, (255, 255, 255, 255))
+            background.alpha_composite(frame)
+            background.convert("RGB").save(output, format="PNG")
         with tempfile.TemporaryDirectory(prefix="wechat-image-clipboard-") as directory:
             clip = Path(directory) / "image.png"
             clip.write_bytes(output.getvalue())
@@ -436,6 +621,8 @@ class AtspiUI:
             # the owner alive until WeChat has consumed and sent the image.
             process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("clipboard_worker.py")), str(clip), str(ready_file)],
                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            pasted = False
+            clicked = False
             try:
                 deadline = time.monotonic() + 5
                 while True:
@@ -454,16 +641,34 @@ class AtspiUI:
                 self._send_guard()
                 # Address the verified WeChat window even if host focus moved.
                 self._command(["xdotool", "key", "--window", self._window_id, "--clearmodifiers", "ctrl+v"])
-                deadline = time.monotonic() + 3
-                while entry.queryText().getText(0, -1).strip() != "\ufffc":
+                deadline = time.monotonic() + 6
+                pasted = False
+                while True:
                     self._send_guard()
+                    # WeChat's accessibility bridge can stall for a second while
+                    # it ingests a pasted image.  A single slow D-Bus reply must
+                    # not abort the send (the old loop raised GLib.GError here and
+                    # left the placeholder in the composer).
+                    try:
+                        current = entry.queryText().getText(0, -1)
+                    except Exception:
+                        log.debug("composer_read_retry", exc_info=True)
+                        current = None
+                    if current is not None and current.strip() == "\ufffc":
+                        pasted = True
+                        break
                     if time.monotonic() >= deadline:
                         raise BackendError("IMAGE_PASTE_UNCONFIRMED", "输入框未出现原生图片，未点击发送")
-                    time.sleep(0.05)
+                    time.sleep(0.1)
                 self._send_guard()
                 if not self._chat_header_matches(chat.name):
                     raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "图片发送前当前会话发生变化")
                 self._click(self._send_button())
+                clicked = True
+            except Exception:
+                if pasted and not clicked:
+                    self._discard_pasted_image(entry, chat)
+                raise
             finally:
                 if process.poll() is None:
                     process.terminate()
@@ -472,6 +677,182 @@ class AtspiUI:
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=2)
+
+    def _discard_pasted_image(self, entry, chat: ChatInfo) -> None:
+        """Remove a bot-pasted image placeholder so it cannot block the next send.
+
+        Only clears the composer when the active conversation is still the
+        target and the content is exactly the placeholder this method pasted;
+        any user text or a changed conversation is left untouched.
+        """
+
+        try:
+            if not self._chat_header_matches(chat.name):
+                return
+            current = entry.queryText().getText(0, -1)
+            if current and current.strip() == "\ufffc":
+                entry.queryEditableText().setTextContents("")
+                log.info("pasted_image_placeholder_discarded chat=%s", chat.name)
+        except Exception:
+            log.debug("pasted_image_placeholder_cleanup_failed", exc_info=True)
+
+    def _wait_file_dialog(self, *, timeout: float = 6.0):
+        deadline = time.monotonic() + timeout
+        while True:
+            for node in self._nodes():
+                try:
+                    if (node.getRoleName() == "dialog"
+                            and (node.name or "").strip() in {"选择文件", "打开", "Open"}
+                            and self._visible(node)):
+                        return node
+                except Exception:
+                    continue
+            if time.monotonic() >= deadline:
+                raise BackendError("FILE_DIALOG_NOT_FOUND", "微信没有打开文件选择框，未发送文件")
+            time.sleep(0.05)
+
+    def _dialog_editable(self, dialog):
+        fallback = None
+        for node in self._nodes(dialog):
+            try:
+                if node.getRoleName() not in {"text", "entry"} or not self._visible(node):
+                    continue
+                node.queryEditableText()
+                if "文件名称" in (node.name or ""):
+                    return node
+                fallback = fallback or node
+            except Exception:
+                continue
+        if fallback is None:
+            raise BackendError("FILE_NAME_FIELD_NOT_FOUND", "文件选择框里没有文件名输入框")
+        return fallback
+
+    def _dialog_button(self, dialog, names: tuple[str, ...]):
+        for node in self._nodes(dialog):
+            try:
+                if (node.getRoleName() == "push button"
+                        and (node.name or "").strip() in names
+                        and self._visible(node)):
+                    return node
+            except Exception:
+                continue
+        raise BackendError("FILE_DIALOG_BUTTON_NOT_FOUND", "文件选择框里没有确认按钮")
+
+    def _file_dialog_present(self) -> bool:
+        for node in self._nodes():
+            try:
+                if (node.getRoleName() == "dialog"
+                        and (node.name or "").strip() == "选择文件"
+                        and self._visible(node)):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def send_file(self, chat: ChatInfo, path: str) -> None:
+        """Send a local document through WeChat's native file chooser.
+
+        The filename field is written through AT-SPI and read back before the
+        dialog is accepted.  The caller verifies the resulting appmsg (type 6,
+        title == basename) in the database; this method never reports success
+        by itself.
+        """
+
+        file_path = Path(path).expanduser().resolve()
+        if not file_path.is_file() or file_path.stat().st_size <= 0:
+            raise BackendError("FILE_MISSING", "待发送文件不存在或为空")
+        self.open_chat(chat)
+        entry = self._input()
+        if entry.queryText().getText(0, -1).strip():
+            raise BackendError("INPUT_OCCUPIED", "输入框已有草稿，未打开文件选择框")
+        try:
+            if self._send_button().getState().contains(self.atspi.STATE_ENABLED):
+                raise BackendError("INPUT_OCCUPIED", "输入框已有附件草稿，未打开文件选择框")
+        except BackendError as exc:
+            if exc.code == "INPUT_OCCUPIED":
+                raise
+        except Exception:
+            pass
+        button = self._find(role="push button", names=("发送文件", "Send File", "Send file"))
+        if button is None:
+            raise BackendError("FILE_BUTTON_NOT_FOUND", "当前微信没有可识别的「发送文件」按钮")
+        self._send_guard()
+        self._click(button)
+        dialog = self._wait_file_dialog()
+        confirmed = False
+        try:
+            self._send_guard()
+            if not self._wait_chat_header(chat.name, 1.0):
+                raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件选择期间当前会话发生变化")
+            field = self._dialog_editable(dialog)
+            field.queryEditableText().setTextContents(str(file_path))
+            time.sleep(0.2)
+            actual = field.queryText().getText(0, -1)
+            if file_path.name not in actual:
+                # Some GTK builds ignore setTextContents on this field; type
+                # the absolute path as real key events and read it back again.
+                self._click(field)
+                self._command(["xdotool", "key", "--clearmodifiers", "ctrl+a"])
+                self._command(["xdotool", "type", "--clearmodifiers", "--delay", "8", str(file_path)])
+                time.sleep(0.2)
+                actual = field.queryText().getText(0, -1)
+            if file_path.name not in actual:
+                raise BackendError("FILE_NAME_UNCONFIRMED", "文件选择框回读不到目标文件名，未点击打开")
+            open_button = self._dialog_button(dialog, ("打开", "Open"))
+            self._send_guard()
+            if not self._wait_chat_header(chat.name, 1.0):
+                raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件发送前当前会话发生变化")
+            self._click(open_button)
+            confirmed = True
+            deadline = time.monotonic() + 15
+            while self._file_dialog_present():
+                if time.monotonic() >= deadline:
+                    raise BackendError("FILE_DIALOG_STUCK", "文件选择框没有关闭，发送结果不确定")
+                time.sleep(0.05)
+            # A few clients ask for one more confirmation before uploading.
+            time.sleep(0.3)
+            for node in self._nodes():
+                try:
+                    if (node.getRoleName() == "dialog" and self._visible(node)
+                            and any((child.getRoleName() == "push button"
+                                     and (child.name or "").strip() in {"发送", "Send"}
+                                     and self._visible(child))
+                                    for child in self._nodes(node))):
+                        for child in self._nodes(node):
+                            if (child.getRoleName() == "push button"
+                                    and (child.name or "").strip() in {"发送", "Send"}
+                                    and self._visible(child)):
+                                self._send_guard()
+                                self._click(child)
+                                break
+                        break
+                except Exception:
+                    continue
+            # WeChat Linux puts the chosen file in the composer as an
+            # attachment chip and waits for the normal Send button.  If the
+            # client auto-sent it instead, the button is disabled and there is
+            # nothing left to click.
+            time.sleep(0.4)
+            if not self._wait_chat_header(chat.name, 3.0):
+                raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件已选好但当前会话发生变化，未点击发送")
+            send_button = self._send_button()
+            try:
+                enabled = send_button.getState().contains(self.atspi.STATE_ENABLED)
+            except Exception:
+                enabled = False
+            if enabled:
+                self._send_guard()
+                if not self._wait_chat_header(chat.name, 2.0):
+                    raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件发送前当前会话发生变化")
+                self._click(send_button)
+                time.sleep(0.5)
+        except Exception:
+            if not confirmed and self._file_dialog_present():
+                try:
+                    self._command(["xdotool", "key", "--clearmodifiers", "Escape"])
+                except BackendError:
+                    log.debug("file_dialog_escape_failed", exc_info=True)
+            raise
 
     def _voice_composer(self, button):
         try:
@@ -815,7 +1196,12 @@ class AtspiUI:
                 pass
 
     def diagnose(self, reason: str) -> str:
-        target = self.settings.wechat_linux_screenshot_dir / (time.strftime("%Y%m%d-%H%M%S") + "-" + re.sub(r"[^A-Z_]", "", reason)[:40] + ".png")
+        # ``reason`` comes from an exception code and is normally a string, but
+        # a third-party exception may carry a non-string ``code`` (for example
+        # GLib/XML errors use an int).  A diagnostic must never mask the real
+        # send error, so coerce before formatting the filename.
+        label = re.sub(r"[^A-Z_]", "", str(reason or ""))[:40]
+        target = self.settings.wechat_linux_screenshot_dir / (time.strftime("%Y%m%d-%H%M%S") + "-" + label + ".png")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             self._command(["import", "-window", "root", str(target)])

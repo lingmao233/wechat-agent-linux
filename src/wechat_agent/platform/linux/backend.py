@@ -33,9 +33,15 @@ _desktop_thread_lock = threading.Lock()
 
 @contextmanager
 def desktop_lease():
-    """Share the desktop between sends and native transcript conversion."""
-    if not _desktop_thread_lock.acquire(blocking=False):
-        raise BackendError("SEND_BUSY", "微信界面正在处理其他发送或语音转换")
+    """Share the desktop between sends and native transcript conversion.
+
+    The bridge and the normal group/private reply path run in the same process
+    but may be triggered by different threads.  Waiting briefly here is much
+    safer than failing one side with SEND_BUSY: a group reply that loses the
+    race should queue behind the bridge send, not disappear.
+    """
+    if not _desktop_thread_lock.acquire(timeout=12):
+        raise BackendError("SEND_BUSY", "微信界面处理超时，请稍后重试")
     descriptor = None
     try:
         if os.name == "posix":
@@ -71,6 +77,25 @@ class LinuxBackend:
         self._ui_lock = threading.Lock()
         self._connected = False
         self.last_send_result = None
+        # Optional provider for the Douyin bridge.  A bound private target may
+        # be delivered to even when it is not in WECHAT_PRIVATE_CHAT_NAMES; the
+        # binding table is the authorization, and the provider is re-read on
+        # every gate so an unbind takes effect immediately.
+        self._dm_allowlist_provider = None
+
+    def set_dm_allowlist_provider(self, provider) -> None:
+        self._dm_allowlist_provider = provider
+
+    def _dm_target_allowed(self, chat_id: str) -> bool:
+        provider = self._dm_allowlist_provider
+        if provider is None:
+            return False
+        try:
+            allowed = {str(value).strip() for value in (provider() or ()) if str(value).strip()}
+        except Exception:
+            return False
+        return str(chat_id or "").strip() in allowed
+
 
     def bind_storage(self, storage) -> None:
         self.storage = storage
@@ -312,9 +337,14 @@ class LinuxBackend:
             raise BackendError("STOPPED", "STOP 文件存在，禁止发送")
         if not self.settings.wechat_allow_send:
             raise BackendError("SENDING_DISABLED", "WECHAT_ALLOW_SEND=false")
-        if not self._chat_allowed(action.group_name, action.group_id):
+        # A Douyin-bridge delivery is authorized by its explicit binding, not
+        # by the group listener allowlist or the member whitelist.  Both still
+        # apply to every other private action.
+        dm_delivery = action.action_type == "dm" and self._dm_target_allowed(action.group_id)
+        if not dm_delivery and not self._chat_allowed(action.group_name, action.group_id):
             raise BackendError("CHAT_NOT_ALLOWED", "目标会话不在白名单")
-        if self.settings.wechat_allowed_members and action.target_member_id not in self.settings.wechat_allowed_members:
+        if (self.settings.wechat_allowed_members and not dm_delivery
+                and action.target_member_id not in self.settings.wechat_allowed_members):
             raise BackendError("MEMBER_NOT_ALLOWED", "目标成员不在白名单")
         if action.account_id != self.account_id:
             raise BackendError("ACCOUNT_MISMATCH", "动作账号与本机微信账号不一致")
@@ -332,7 +362,13 @@ class LinuxBackend:
         with scope_transaction(self.storage, action.account_id, "__outbound__") as session:
             recent = list(session.execute(select(LinuxNativeSendRow.attempted_at, LinuxNativeSendRow.action_id).where(LinuxNativeSendRow.account_id == action.account_id, LinuxNativeSendRow.attempted_at > now - timedelta(hours=1))))
             ledger = session.get(LinuxSendRow, action_id)
-            needed = 1 + len(action.media_paths) if action.send_text_with_media and not ledger.attempts else 1
+            if action.send_text_with_media and not (ledger and ledger.attempts):
+                needed = 1 + len(action.media_paths) + len(action.file_paths)
+            elif not action.text.strip():
+                needed = len(action.media_paths) + len(action.file_paths)
+            else:
+                needed = 1
+            needed = max(1, needed)
             if sum(aware(value.attempted_at) >= now - timedelta(minutes=1) for value in recent) + needed > 20:
                 raise BackendError("RATE_LIMITED", "每分钟原生消息熔断上限已达到")
             if self.settings.wechat_max_replies_per_hour and len(recent) + needed > self.settings.wechat_max_replies_per_hour:
@@ -350,7 +386,7 @@ class LinuxBackend:
         with self.storage.Session.begin() as session:
             session.get(LinuxNativeSendRow, identifier).message_ids_json = encode(result.message_ids)
 
-    def _verify(self, chat, before: dict, *, kind: str, text: str = "", md5: str = "", duration: float = 0) -> SendResult | None:
+    def _verify(self, chat, before: dict, *, kind: str, text: str = "", md5: str = "", duration: float = 0, size: int = 0) -> SendResult | None:
         deadline = time.monotonic() + self.settings.wechat_linux_verify_seconds
         while True:
             voices = []
@@ -358,7 +394,42 @@ class LinuxBackend:
                 if int(row.get("local_id") or 0) <= before.get(row.get("_shard", "message_0.db"), 0):
                     continue
                 event = self._event(row, chat)
-                if not event.is_self or event.message_type != kind:
+                if not event.is_self:
+                    continue
+                if kind == "file":
+                    appmsg_type = str(event.media_metadata.get("appmsg_type") or "")
+                    if (event.message_type == "appmsg" and appmsg_type == "6"
+                            and (not text or event.text == text)):
+                        return SendResult(True, (str(event.external_message_id),), "file")
+                    if (event.message_type == "appmsg" and appmsg_type == "8"
+                            and size > 0
+                            and int(event.media_metadata.get("appmsg_totallen") or 0) == int(size)):
+                        extension = Path(text).suffix.lower().lstrip(".") if text else ""
+                        actual = str(event.media_metadata.get("appmsg_fileext") or "")
+                        if extension and actual and extension != actual:
+                            continue
+                        # WeChat turns a GIF chosen through the file picker
+                        # into a native animated emoticon (appmsg type 8);
+                        # that is a successful delivery, not a partial file.
+                        return SendResult(True, (str(event.external_message_id),), "animation")
+                    # WeChat may also import a GIF chosen through the file
+                    # picker as a native sticker (local_type 47) instead of
+                    # appmsg type 8.  Identify it by the exact sticker md5 and
+                    # byte length of the file we sent.
+                    if (event.message_type == "sticker" and event.is_self and size > 0
+                            and str(text).lower().endswith(".gif")
+                            and int(event.sticker_size or 0) == int(size)
+                            and event.sticker_md5):
+                        return SendResult(True, (str(event.external_message_id),), "sticker", event.sticker_md5)
+                    # A video selected through the file picker is uploaded as
+                    # a native type-43 message; its exact byte length is the
+                    # read-back identity.  Do not mistake it for an unrelated
+                    # video of a different size.
+                    if (event.message_type == "video" and size > 0
+                            and int(event.media_metadata.get("video_length") or 0) == int(size)):
+                        return SendResult(True, (str(event.external_message_id),), "video")
+                    continue
+                if event.message_type != kind:
                     continue
                 if kind == "voice":
                     voices.append(event)
@@ -384,11 +455,19 @@ class LinuxBackend:
     def send(self, action) -> SendResult:
         self._ensure_db()
         self._gate(action)
-        chat = self.db.resolve_chat(action.group_name)
+        # A bound private delivery already carries the stable wxid; resolve by
+        # id so two contacts with the same nickname cannot trigger
+        # CHAT_AMBIGUOUS.  Groups keep resolving by their configured name.
+        chat = self.db.resolve_chat(action.group_id if action.action_type == "dm" else action.group_name)
         if chat.chat_id != action.group_id:
             raise BackendError("CHAT_ID_MISMATCH", "动作稳定群 ID 与配置解析结果不一致")
         action_id = stable_id(action.account_id, action.group_id, action.idempotency_key or action.request_id or uuid.uuid4().hex)
-        expected = {"text": action.text, "images": action.media_paths, "sticker_intent": action.sticker_intent}
+        expected = {
+            "text": action.text,
+            "images": action.media_paths,
+            "files": action.file_paths,
+            "sticker_intent": action.sticker_intent,
+        }
         if action.voice_path:
             from ...speech import wave_duration
             if action.media_paths or action.sticker_intent or action.at_names or action.send_text_with_media:
@@ -404,8 +483,16 @@ class LinuxBackend:
         now = utc_now()
         with scope_transaction(self.storage, action.account_id, "__outbound__") as session:
             ledger = session.get(LinuxSendRow, action_id)
-            if ledger and json.loads(ledger.expected_json) != expected:
-                raise BackendError("ACTION_CONFLICT", "幂等键对应的发送内容发生变化")
+            if ledger:
+                stored_expected = json.loads(ledger.expected_json)
+                # ``files`` was added after the original ledger shape.  An
+                # empty file list is semantically identical to the old row,
+                # so an upgrade must not turn a previously valid action into
+                # ACTION_CONFLICT.
+                if "files" not in stored_expected and not action.file_paths:
+                    stored_expected["files"] = []
+                if stored_expected != expected:
+                    raise BackendError("ACTION_CONFLICT", "幂等键对应的发送内容发生变化")
             if ledger and ledger.status == "verified":
                 data = json.loads(ledger.receipts_json)
                 return SendResult(True, tuple(data), ledger.message_type)
@@ -476,7 +563,7 @@ class LinuxBackend:
                     receipts.extend(result.message_ids)
                     self._native_verified(native_id, result)
                 elif not choice:
-                    if not action.media_paths and not action.text.strip():
+                    if not action.media_paths and not action.file_paths and not action.text.strip():
                         raise BackendError("EMPTY_MESSAGE", "表情索引不可用，且没有可发送的文字兜底")
                     if action.text.strip() and (not action.media_paths or action.send_text_with_media):
                         self._gate(action)
@@ -498,7 +585,29 @@ class LinuxBackend:
                             raise BackendError("SEND_UNVERIFIED", "原生图片未通过数据库回读核验")
                         receipts.extend(result.message_ids)
                         self._native_verified(native_id, result)
-                message_type = "voice" if action.voice_path else "sticker" if choice else "text_image" if action.media_paths and action.send_text_with_media else "image" if action.media_paths else "text"
+                    for path in action.file_paths:
+                        self._gate(action)
+                        file_path = Path(path)
+                        if not file_path.is_file() or file_path.stat().st_size <= 0:
+                            raise BackendError("FILE_MISSING", "待发送文件不存在或为空")
+                        before = self.db.watermarks(chat.chat_id)
+                        native_id = self._native_reserve(action, action_id, "file")
+                        self.ui.send_file(chat, str(file_path))
+                        result = self._verify(chat, before, kind="file", text=file_path.name, size=file_path.stat().st_size)
+                        if not result:
+                            raise BackendError("SEND_UNVERIFIED", "原生文件未通过数据库回读核验")
+                        receipts.extend(result.message_ids)
+                        self._native_verified(native_id, result)
+                if action.voice_path:
+                    message_type = "voice"
+                elif choice:
+                    message_type = "sticker"
+                elif action.file_paths:
+                    message_type = "image_file" if action.media_paths else "text_file" if action.text.strip() else "file"
+                elif action.media_paths:
+                    message_type = "text_image" if action.send_text_with_media else "image"
+                else:
+                    message_type = "text"
                 with scope_transaction(self.storage, action.account_id, action.group_id) as session:
                     ledger = session.get(LinuxSendRow, action_id)
                     ledger.status, ledger.receipts_json, ledger.updated_at = "verified", encode(receipts), utc_now()
@@ -507,10 +616,21 @@ class LinuxBackend:
                 self.last_send_result = SendResult(True, tuple(receipts), message_type, choice["md5"] if choice else "")
                 return self.last_send_result
             except Exception as exc:
-                self.ui.diagnose(getattr(exc, "code", "SEND_FAILED"))
+                code = getattr(exc, "code", type(exc).__name__)
+                # Keep the real failure visible: a third-party exception may
+                # carry a non-string code, and the failure screenshot must not
+                # replace the send error with its own TypeError.
+                log.warning(
+                    "send_failed action_id=%s code=%s error=%s",
+                    action_id, code, exc, exc_info=True,
+                )
+                try:
+                    self.ui.diagnose(str(code))
+                except Exception:
+                    log.debug("send_diagnose_failed action_id=%s", action_id, exc_info=True)
                 with scope_transaction(self.storage, action.account_id, action.group_id) as session:
                     ledger = session.get(LinuxSendRow, action_id)
-                    ledger.status, ledger.error_code, ledger.updated_at = "uncertain", getattr(exc, "code", type(exc).__name__), utc_now()
+                    ledger.status, ledger.error_code, ledger.updated_at = "uncertain", str(code)[:64], utc_now()
                     ledger.lease_until = None
                 raise
             finally:

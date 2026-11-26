@@ -8,6 +8,8 @@ Linux 通过本地 SQLCipher 数据库读取消息，通过 AT-SPI / X11 操作�
 
 小红书与抖音通过可见浏览器适配器接入：平台账号可绑定到微信成员，形成三号互联；浏览、评论和 @ 记忆跨平台共享；群里的“想去/攻略/推荐”等意图会先触发平台浏览并并入群回复，回复发送后可为已关联成员生成带原生 @ 的平台评论计划；主动浏览默认关闭。平台写操作默认 dry-run，真实发送需要写开关和动作台账二次确认，不绕过验证码或登录保护。设计边界见 [三号互联方案](docs/PLATFORM-THREE-WAY.md) 与 [平台适配器说明](docs/PLATFORM_ADAPTERS.md)。
 
+新增**抖音私信 ↔ 微信媒体桥**：在同一个抖音登录态里只监听一个配置的私信会话；抖音收到表情/视频会**自动**送到绑定的微信联系人（表情只发表情，不再发原生图片；视频发无水印 mp4），不需要额外指令。反方向微信表情要转到抖音时必须由用户明确说“转到抖音”，桥才会读取微信表情原文件并上传到对应抖音会话。抖音或微信私聊里收到 **B 站视频链接**也会下载 DASH 流并用 ffmpeg 无损合并为无水印 MP4；微信侧链接回传到原微信会话，抖音侧链接发到绑定微信。投递仍走现有微信发送台账和数据库回读，默认 dry-run。需要单独的 DTK 解析实例，且抖音网页版属于非官方接口，有账号风控风险。设计、配置和实机验收步骤见 [抖音私信 → 微信媒体桥](docs/DOUYIN-WECHAT-BRIDGE.md)。
+
 当前开发与实机验收状态见 [STATUS.md](STATUS.md)；逐项证据与未达到的指标见 [验收记录](docs/ACCEPTANCE.md)。
 
 完整部署使用 `dist/wechat_agent_linux-0.2.0.tar.gz` 源码包，包含文档、安装脚本、迁移和人设。另有 Python wheel；单独安装 wheel 时，需另外准备图形会话和人设配置，并设置 `PERSONA_FILE` 指向人设文件。
@@ -37,7 +39,7 @@ WECHAT_PLATFORM=linux
 WECHAT_LINUX_DATA_DIR=/home/your-user/xwechat_files/wxid_example_suffix
 WECHAT_ACCOUNT_ID=wxid_example
 WECHAT_GROUP_NAMES=测试群
-WECHAT_LINUX_CHAT_IDS='{"测试群":"123456789@chatroom"}'
+WECHAT_LINUX_CHAT_IDS='{"测试群":"12345678@chatroom"}'
 WECHAT_ALLOW_SEND=false
 ```
 
@@ -141,6 +143,7 @@ ${WECHAT_PYTHON:-.venv/bin/python} scripts/accept-linux.py \
 - [Linux 部署、会话与配置](docs/DEPLOYMENT-LINUX.md)
 - [Linux 重构方案与边界](docs/LINUX-REFACTOR.md)
 - [记忆、上下文、情绪与调度](docs/MEMORY-RUNTIME.md)
+- [抖音私信 → 微信媒体桥](docs/DOUYIN-WECHAT-BRIDGE.md)
 - [FR / AC 验收映射与证据](docs/ACCEPTANCE.md)
 - [Linux PRD](docs/PRD-LINUX.md) / [记忆与情绪 PRD](docs/PRD-MEMORY-CONTEXT-EMOTION.md)
 

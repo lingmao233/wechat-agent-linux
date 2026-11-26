@@ -23,6 +23,14 @@ log = logging.getLogger(__name__)
 
 _ID = re.compile(r"[0-9a-f]{64}\Z")
 _ADDRESSEE = re.compile(r"用户|客户|顾客|群主|管理员|亲爱的|老铁|家人们|wxid_|@|\busers?\b|\bcustomers?\b", re.I)
+# Appended to every new prompt but deliberately kept out of ``_style_id``: the
+# first-version cache (103 assets) must stay reusable while new pictures get
+# human hands instead of fins.
+_HAND_GUARD = (
+    "双手都是人类的手。两只手腕从各自袖口自然伸出，左右手方向正确。"
+    "每只手恰好五指，拇指位置和指节弯曲符合手势，五指自然分开、轮廓可辨。"
+    "依视角呈现掌面或手背。避免手指互相遮挡、粘连，避免袖口吞掉手掌。"
+)
 
 
 def _clean(value: str) -> str:
@@ -142,6 +150,46 @@ class ReactionImages:
         return not any(len(name.strip()) >= 2 and unicodedata.normalize("NFKC", _clean(name)).casefold() in text.casefold()
                        for name in names if name)
 
+    def _image_id(self, plan: ReactionImagePlan) -> str:
+        """Meaning, action and the exact printed caption determine reuse.
+
+        The prose prompt varies between turns and a friend's identity must never
+        enter the cache key, so neither is hashed here.
+        """
+
+        key = json.dumps([self._style_id, plan.emotion.casefold(), plan.action.casefold(), plan.caption,
+                          plan.scene.casefold(), tuple(tag.casefold() for tag in plan.topic_tags)],
+                         ensure_ascii=False)
+        return hashlib.sha256(key.encode()).hexdigest()
+
+    def _store(self, image_id: str, plan: ReactionImagePlan, source: Path) -> dict:
+        """Copy one picture into the cache as a bounded RGBA PNG plus sidecar."""
+
+        if source.stat().st_size > self.settings.image_upload_max_bytes:
+            raise ValueError("reaction_image_too_large")
+        self.root.mkdir(parents=True, exist_ok=True)
+        temporary: list[Path] = []
+        try:
+            temp_image = self.root / f".{uuid4().hex}.tmp"
+            temporary.append(temp_image)
+            with Image.open(source) as picture:
+                picture.convert("RGBA").save(temp_image, format="PNG")
+            if temp_image.stat().st_size > self.settings.image_upload_max_bytes:
+                raise ValueError("reaction_image_too_large")
+            item = {"image_id": image_id, "style_id": self._style_id, "emotion": plan.emotion,
+                    "action": plan.action, "prompt": plan.prompt, "caption": plan.caption,
+                    "scene": plan.scene, "topic_tags": list(plan.topic_tags),
+                    "sha256": hashlib.sha256(temp_image.read_bytes()).hexdigest()}
+            temp_meta = self.root / f".{uuid4().hex}.tmp"
+            temporary.append(temp_meta)
+            temp_meta.write_text(json.dumps(item, ensure_ascii=False), encoding="utf-8")
+            os.replace(temp_image, self.root / f"{image_id}.png")
+            os.replace(temp_meta, self.root / f"{image_id}.json")
+            return item
+        finally:
+            for path in temporary:
+                path.unlink(missing_ok=True)
+
     def _entry(self, image_id: str) -> dict | None:
         if not _ID.fullmatch(image_id):
             return None
@@ -185,14 +233,26 @@ class ReactionImages:
         return result
 
     def prompt(self, plan: ReactionImagePlan) -> str:
-        caption = (
-            "画面中的唯一文字为这句简短文案：" + json.dumps(plan.caption, ensure_ascii=False) + "。逐字准确绘制，不添加其他文字。"
-            if plan.caption else "画面不出现任何文字、字母、字幕或对话文字。"
+        caption_rule = (
+            "画面中唯一可见的文字是「" + plan.caption + "」中的内容。逐字绘制，省略引号，文字避开脸和双手。"
+            if plan.caption else "整张图无字，包括衣服、饰品、道具和背景。"
         )
-        return (self.image_style + "\n本张情绪：" + plan.emotion + "。动作与含义：" + plan.action
-                + "。\n由对话模型设计的画面：" + plan.prompt + "\n" + caption
-                + "不出现用户等身份称呼，不出现昵称、姓名、账号、@、落款、水印和收件对象。"
-                + "只用通用情绪、动作和道具表达，适合下次复用；保持单幅、单一意思。")
+        scene = plan.scene or "简洁浅色背景"
+        return (
+            "画一张可独立发送的日系Q版聊天表情包，缩小后仍能一眼读懂情绪。\n\n"
+            "【固定角色】\n" + self.image_style
+            + "保留少女的脸、身体和人类双手；身后连着一条蓝色鲸尾。\n\n"
+            "【本张画面】\n"
+            "情绪：" + plan.emotion + "\n"
+            "动作与含义：" + plan.action + "\n"
+            "具体画面：" + plan.prompt + "\n"
+            "背景：" + scene + "\n\n"
+            "【构图与手部】\n"
+            "同一角色只出现一次，一个取景框定格一个瞬间。脸和手势清晰，鲸尾的位置容易辨认，背景简洁。"
+            "禁止分格、拼图、连续动作、角色残影和额外的鲸鱼动物。\n"
+            + _HAND_GUARD + "\n\n"
+            "【画面文字】\n" + caption_rule
+        )
 
     def prepare(self, plan: ReactionImagePlan, *, names: list[str] | None = None, scene_hint: str = "") -> ReactionImage | None:
         names = names or []
@@ -210,7 +270,11 @@ class ReactionImages:
                 cached_plan = ReactionImagePlan.from_dict(item)
                 if not item or not cached_plan or not self._generic(cached_plan, names):
                     return None
-                if not self._scene_compatible(plan, cached_plan):
+                # A meaning-first planner may return only ``reuse_id``; that
+                # hit is trusted after the asset itself is validated.  Older
+                # plans that carry scene/tags still get the stricter overlap
+                # check so an unrelated asset cannot be smuggled in.
+                if (plan.scene or plan.topic_tags) and not self._scene_compatible(plan, cached_plan):
                     log.info("reaction image reuse rejected: scene mismatch requested=%s cached=%s", plan.scene, cached_plan.scene)
                     return None
                 return self._result(item, reused=True)
@@ -221,44 +285,55 @@ class ReactionImages:
                 return None
             if not plan.scene:
                 plan = ReactionImagePlan(plan.emotion, plan.action, plan.prompt, plan.caption, plan.reuse_id, scene, plan.topic_tags)
-            key = json.dumps([self._style_id, plan.emotion.casefold(), plan.action.casefold(), plan.caption,
-                              plan.scene.casefold(), tuple(tag.casefold() for tag in plan.topic_tags)], ensure_ascii=False)
-            image_id = hashlib.sha256(key.encode()).hexdigest()
+            image_id = self._image_id(plan)
             item = self._entry(image_id)
             if item:
                 return self._result(item, reused=True)
             generated = None
-            temporary = []
             try:
                 generated = self.image_client.generate(self.prompt(plan))
                 if not generated.local_paths:
                     return None
-                source = Path(generated.local_paths[0])
-                if source.stat().st_size > self.settings.image_upload_max_bytes:
-                    raise ValueError("reaction_image_too_large")
-                self.root.mkdir(parents=True, exist_ok=True)
-                path = self.root / f"{image_id}.png"
-                temp_image = self.root / f".{uuid4().hex}.tmp"
-                temporary.append(temp_image)
-                with Image.open(source) as picture:
-                    picture.convert("RGBA").save(temp_image, format="PNG")
-                if temp_image.stat().st_size > self.settings.image_upload_max_bytes:
-                    raise ValueError("reaction_image_too_large")
-                item = {"image_id": image_id, "style_id": self._style_id, "emotion": plan.emotion,
-                        "action": plan.action, "prompt": plan.prompt, "caption": plan.caption,
-                        "scene": plan.scene, "topic_tags": list(plan.topic_tags),
-                        "sha256": hashlib.sha256(temp_image.read_bytes()).hexdigest()}
-                temp_meta = self.root / f".{uuid4().hex}.tmp"
-                temporary.append(temp_meta)
-                temp_meta.write_text(json.dumps(item, ensure_ascii=False), encoding="utf-8")
-                os.replace(temp_image, path)
-                os.replace(temp_meta, self.root / f"{image_id}.json")
+                item = self._store(image_id, plan, Path(generated.local_paths[0]))
                 return self._result(item, reused=False)
             finally:
-                for path in temporary:
-                    path.unlink(missing_ok=True)
                 if generated and generated.local_paths:
                     self.image_client.cleanup_local(generated.local_paths)
+
+    def register(self, source: str | Path, plan: ReactionImagePlan, *,
+                 names: list[str] | None = None) -> ReactionImage | None:
+        """Add an already-approved picture to the cache without calling a model.
+
+        A hand-picked or externally produced picture is offered and reused by
+        the same meaning rules as a generated one: the sidecar, generic-text
+        test, size bound and sha256 all still apply.  ``plan.prompt`` is kept as
+        the stored visual description rather than being sent anywhere.
+        """
+
+        if not self.image_style:
+            return None
+        plan = ReactionImagePlan.from_dict({**asdict(plan), "reuse_id": ""})
+        if not plan or not self._generic(plan, names or []):
+            log.info("reaction image import declined: invalid plan or contains an addressee")
+            return None
+        scene = plan.scene or _clean(f"{plan.emotion} {plan.action}")
+        if not scene:
+            return None
+        plan = ReactionImagePlan(plan.emotion, plan.action, plan.prompt, plan.caption, "", scene, plan.topic_tags)
+        source = Path(source)
+        if not source.is_file():
+            return None
+        image_id = self._image_id(plan)
+        with self._lock():
+            item = self._entry(image_id)
+            if item:
+                return self._result(item, reused=True)
+            try:
+                item = self._store(image_id, plan, source)
+            except (OSError, ValueError, Image.DecompressionBombError):
+                log.warning("reaction image import failed source=%s", source.name, exc_info=True)
+                return None
+            return self._result(item, reused=False)
 
     def _result(self, item: dict, *, reused: bool) -> ReactionImage:
         return ReactionImage(str(self.root / f"{item['image_id']}.png"), item["image_id"],

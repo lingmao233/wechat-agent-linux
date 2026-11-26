@@ -67,7 +67,10 @@ class ElevenLabsTTSProvider(TTSProvider):
             "similarity_boost": 0.75,
         }
 
-    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None) -> bytes:
+    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None,
+                   rate: float | None = None, instruction: str | None = None) -> bytes:
+        # ElevenLabs applies its own voice settings; the style layer's rate and
+        # instruction are intentionally ignored rather than silently mapped.
         if not self.configured:
             raise VoiceProviderError("tts_provider_config")
         voice = (voice or str(getattr(self.settings, "tts_voice", "") or "")).strip()

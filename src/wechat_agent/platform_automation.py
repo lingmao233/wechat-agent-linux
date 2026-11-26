@@ -362,7 +362,6 @@ class PlatformAutomation:
                         ensure_ascii=False,
                     ),
                     temperature=0.7,
-                    max_tokens=200,
                     timeout_seconds=min(
                         20.0,
                         float(getattr(self.settings, "llm_timeout_seconds", 60) or 60),

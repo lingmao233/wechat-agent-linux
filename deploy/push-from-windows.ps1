@@ -2,9 +2,9 @@
 #
 # 做三件事：打包当前源码（不含 .env/state/.venv）→ scp 到 VM → ssh 里跑 bootstrap。
 #
-#   .\deploy\push-from-windows.ps1 -VmHost 192.168.1.50 -User wx
-#   .\deploy\push-from-windows.ps1 -VmHost 192.168.1.50 -User wx -Phase key
-#   .\deploy\push-from-windows.ps1 -VmHost 192.168.1.50 -User wx -Tunnel   # 建 8765 隧道看控制台
+#   .\deploy\push-from-windows.ps1 -VmHost 203.0.113.10 -User wx
+#   .\deploy\push-from-windows.ps1 -VmHost 203.0.113.10 -User wx -Phase key
+#   .\deploy\push-from-windows.ps1 -VmHost 203.0.113.10 -User wx -Tunnel   # 建 8765 隧道看控制台
 #
 # 需要：Windows 自带 OpenSSH 客户端（ssh/scp）、VM 已装 openssh-server 且能 ping 通。
 

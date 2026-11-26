@@ -89,17 +89,19 @@ class OpenAICompatibleTTSProvider(TTSProvider):
             "instruction": str(getattr(self.settings, "tts_instruction", "") or ""),
         }
 
-    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None) -> bytes:
+    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None,
+                   rate: float | None = None, instruction: str | None = None) -> bytes:
         payload = {
             "model": str(getattr(self.settings, "tts_model", "") or ""),
             "input": text,
             "voice": voice or str(getattr(self.settings, "tts_voice", "") or ""),
             "response_format": "wav",
         }
-        rate = float(getattr(self.settings, "tts_rate", 1.0) or 1.0)
-        if rate != 1.0:
-            payload["speed"] = rate
-        instruction = str(getattr(self.settings, "tts_instruction", "") or "").strip()
+        speed = float(getattr(self.settings, "tts_rate", 1.0) or 1.0) if rate is None else float(rate)
+        if speed != 1.0:
+            payload["speed"] = speed
+        if instruction is None:
+            instruction = str(getattr(self.settings, "tts_instruction", "") or "").strip()
         if instruction and "gpt-4o" in payload["model"].casefold():
             payload["instructions"] = instruction
         headers = {"Content-Type": "application/json"}
