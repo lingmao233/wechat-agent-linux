@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 import shutil
-from threading import RLock
+from threading import RLock, get_ident
 from time import monotonic, sleep
 from typing import Any, Mapping
 from urllib.parse import quote, urljoin, urlparse
@@ -281,6 +281,7 @@ class BrowserPlatformAdapter:
         self._playwright: Any | None = None
         self._context: Any | None = None
         self._page: Any | None = None
+        self._owner_thread: int | None = None
         self._items: dict[str, BrowseItem] = {}
         self._comments: dict[str, PlatformComment] = {}
         self._action_times: list[float] = []
@@ -335,6 +336,7 @@ class BrowserPlatformAdapter:
             self._context = None
             self._page = None
             self._playwright = None
+            self._owner_thread = None
             if context:
                 try:
                     context.close()
@@ -345,6 +347,24 @@ class BrowserPlatformAdapter:
                     playwright.stop()
                 except Exception:
                     pass
+
+    def ensure_session(self) -> Any:
+        """Return the shared persistent browser context, launching it if needed.
+
+        The chat bridge opens its own tab in this context instead of a second
+        persistent profile.  Chromium locks a user-data directory, so a second
+        profile would either fail or force another QR login; sharing the
+        context keeps one login and one cookie jar.
+        """
+
+        with self._lock:
+            if self._context is not None and self._owner_thread not in {None, get_ident()}:
+                raise BrowserPlatformError(
+                    "browser_thread_conflict: Playwright 的同步对象只能在创建它的线程使用；"
+                    "请重启 Agent，让抖音桥先创建浏览器，或在桥运行期间不要打开平台浏览页"
+                )
+            self._ensure_browser()
+            return self._context
 
     def browse(self, query: str = "", limit: int = 20) -> list[BrowseItem]:
         with self._lock:
@@ -507,6 +527,7 @@ class BrowserPlatformAdapter:
             self._context = self._playwright.chromium.launch_persistent_context(**options)
             self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
             self._page.set_default_timeout(self.page_timeout_ms)
+            self._owner_thread = get_ident()
         except Exception:
             try:
                 self._playwright.stop()

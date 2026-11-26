@@ -216,6 +216,12 @@ class WeChatLinuxDB:
     def resolve_chat(self, value: str) -> ChatInfo:
         mapping = json.loads(self.settings.wechat_linux_chat_ids)
         identifier = mapping.get(value, value)
+        # File Transfer is a system chat and is intentionally absent from the
+        # private-chat picker, but acceptance scripts and the bridge's file
+        # sender still need its stable id.  Resolve only this one system chat;
+        # no other service conversation becomes addressable.
+        if identifier == "filehelper" or str(value or "").strip() in {"文件传输助手", "File Transfer"}:
+            return ChatInfo("filehelper", "文件传输助手")
         # Direct chats are resolved only when explicitly enabled by the
         # backend; keeping the DB resolver capable of finding them also lets a
         # stable wxid be used instead of a duplicate display name.

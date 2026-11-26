@@ -23,6 +23,7 @@ NAV = (
     ("overview", "/", "概览", "home"),
     ("memory", "/memory", "回声", "echo"),
     ("platform", "/platform", "平台", "platform"),
+    ("douyin_bridge", "/douyin-bridge", "抖音桥", "link"),
     ("logs", "/logs", "日志", "logs"),
     ("settings", "/settings", "设置", "settings"),
 )
@@ -881,6 +882,26 @@ class WebConsole:
             "recent": recent[:5],
             "last_error": _platform_text(data.get("last_error")),
         }
+
+    def douyin_bridge_page(self) -> str:
+        context = self._base("douyin_bridge")
+        try:
+            status = self.controller.douyin_bridge_status()
+        except Exception as exc:
+            status = {"enabled": False, "last_error": str(exc)}
+        try:
+            bindings = self.controller.douyin_bridge_bindings().get("bindings") or []
+        except Exception:
+            bindings = []
+        context.update(
+            {
+                "title": "抖音桥",
+                "bridge_status": status,
+                "bindings": bindings,
+                "bridge_enabled": bool(status.get("enabled")),
+            }
+        )
+        return render("douyin_bridge.html", **context)
 
     def platform(self, query: dict | None = None) -> str:
         """抖音 / 小红书 / 微信三号互联控制台页。"""

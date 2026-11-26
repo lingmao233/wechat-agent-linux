@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}抖音桥{% endblock %}
+{% block heading %}抖音桥{% endblock %}
+{% block subtitle %}在这里把抖音私聊和微信一对一联系人绑定；绑定后表情/视频自动互转，不需要指令。{% endblock %}
+{% block header_actions %}<span class="soft-badge{% if bridge_enabled %} on{% endif %}">{{ '桥已启用' if bridge_enabled else '桥未启用' }}</span>{% endblock %}
+{% block content %}
+<section class="card data-card platform-section">
+  <div class="data-card-head">
+    <div><h2>运行状态</h2><p>抖音浏览器在 VM 的第二个工作区；按 Ctrl+Alt+→ 或点工作区切换器即可看到。</p></div>
+    <span class="soft-badge" id="bridgeRunBadge">读取中…</span>
+  </div>
+  <div class="platform-facts" id="bridgeRunFacts">
+    <div><span>抖音连接</span><strong id="bridgeRunConnected">—</strong></div>
+    <div><span>当前会话</span><strong id="bridgeRunConversation">—</strong></div>
+    <div><span>最近轮询</span><strong id="bridgeRunScan">—</strong></div>
+    <div><span>绑定 / 投递</span><strong id="bridgeRunCounts">—</strong></div>
+    <div><span>自愈</span><strong id="bridgeRunWatchdog">—</strong></div>
+  </div>
+  <p class="platform-form-hint" id="bridgeRunError"></p>
+</section>
+
+<section class="card data-card platform-section">
+  <div class="data-card-head">
+    <div><h2>绑定微信用户与抖音用户</h2><p>选择微信联系人和抖音私聊，点一次「绑定」即可；群聊不会出现在列表里。</p></div>
+    <span class="soft-badge">{{ bindings|length }} 条绑定</span>
+  </div>
+  <form class="platform-bind-form" id="bridgeBindForm" autocomplete="off">
+    <label class="compact-field grow"><span>微信联系人</span><select id="bridgeWxContact" required><option value="">加载中…</option></select></label>
+    <label class="compact-field grow"><span>抖音私聊</span><select id="bridgeDyConversation" required><option value="">加载中…</option></select></label>
+    <button class="btn small secondary" type="button" id="bridgeRefreshConversations">{{ icon('refresh', 13) }}刷新抖音会话</button>
+    <button class="btn small" type="submit" id="bridgeBindBtn">{{ icon('link', 13) }}绑定</button>
+  </form>
+  <p class="platform-form-hint" id="bridgeHint">抖音会话来自当前已登录的抖音私信列表；微信联系人来自本机微信的一对一联系人。绑定后双方互转会自动执行。</p>
+  <div class="table-wrap">
+    <table class="data-table" id="bridgeBindingTable">
+      <thead><tr><th>微信</th><th>抖音私聊</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>
+        {% for row in bindings %}
+        <tr data-binding-row="{{ row.id }}">
+          <td>{{ row.wx_name or row.wxid }}<small class="table-subtext">{{ row.wxid }}</small></td>
+          <td>{{ row.peer_name or row.conversation_id }}<small class="table-subtext">{{ row.conversation_id }}</small></td>
+          <td><span class="chip {{ 'ok' if row.status == 'active' else 'warn' }}">{{ row.status }}</span></td>
+          <td><button class="btn ghost small" type="button" data-binding-delete="{{ row.id }}">解绑</button></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4"><div class="empty-inline">还没有绑定。选择上面的两个下拉框，点「绑定」。</div></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="/static/douyin_bridge.js"></script>{% endblock %}

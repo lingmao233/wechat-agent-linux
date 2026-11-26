@@ -71,6 +71,7 @@ class WeChatAgent:
         platform_service=None,
         platform_automation=None,
         platform_memory=None,
+        douyin_bridge=None,
         web_research=None,
         image_client=None,
         voice_service=None,
@@ -99,6 +100,7 @@ class WeChatAgent:
         # CLI/test constructions keep working unchanged.
         self.platform_automation = platform_automation
         self.platform_memory = platform_memory or getattr(platform_automation, "memory", None)
+        self.douyin_bridge = douyin_bridge
         self.image_client = image_client or ImageClient(settings)
         # Keep the optional picture style in sync with the speaking persona.
         # Injected test doubles may not expose a persona; in that case
@@ -257,6 +259,9 @@ class WeChatAgent:
         reader.start()
         last_purge = 0.0
         try:
+            if self.douyin_bridge is not None:
+                self.douyin_bridge.attach_backend(self.ui)
+                self.douyin_bridge.start()
             while not self.policy.is_stopped():
                 try:
                     replied = self._reply_next()
@@ -287,6 +292,8 @@ class WeChatAgent:
             self.memory.worker.close()
             self.voice.close()
             self._log_pending_reply_jobs()
+            if self.douyin_bridge is not None:
+                self.douyin_bridge.stop()
             self.ui.close()
 
     def _linux_proactive_scopes(self, listener_scopes: set[tuple[str, str]]) -> set[tuple[str, str]]:

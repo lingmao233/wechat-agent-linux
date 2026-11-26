@@ -144,6 +144,11 @@ class OutboundAction:
     # separate from ``text`` prevents generated image URLs from being pasted
     # into the chat as plain text.
     media_paths: list[str] = field(default_factory=list)
+    # Documents (a video, an animated sticker, an arbitrary file) are sent
+    # through the native file chooser and verified as an appmsg of type 6.
+    # They are kept separate from ``media_paths`` because WeChat renders the
+    # two as different message kinds.
+    file_paths: list[str] = field(default_factory=list)
     sticker_intent: str = ""
     request_id: str = ""
     idempotency_key: str = ""

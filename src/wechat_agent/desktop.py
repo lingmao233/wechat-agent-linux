@@ -28,6 +28,7 @@ from .platforms.service import PlatformService
 from .platform_automation import PlatformAutomation
 from .platform_identity import PlatformIdentityService
 from .platform_memory import PlatformMemoryService
+from .douyin_bridge.service import DouyinBridgeService
 from .storage import Storage
 from .console_memory import MemoryConsole, config_fields
 from .persona_designer import generate_persona_design
@@ -101,6 +102,35 @@ CONFIG_SCHEMA: list[dict[str, object]] = [
     {"key": "platform_proactive_interval_minutes", "env": "PLATFORM_PROACTIVE_INTERVAL_MINUTES", "label": "主动浏览间隔（分钟）", "category": "平台", "type": "number", "description": "两次主动浏览之间的间隔，最小 30 分钟。"},
     {"key": "platform_proactive_keywords", "env": "PLATFORM_PROACTIVE_KEYWORDS", "label": "主动浏览关键词", "category": "平台", "type": "text", "description": "逗号分隔；留空时从成员兴趣记忆取词。"},
     {"key": "platform_quiet_hours", "env": "PLATFORM_QUIET_HOURS", "label": "平台静默时段", "category": "平台", "type": "text", "description": "例如 23:00-08:00；该时段内不自动执行主动浏览。"},
+    {"key": "douyin_bridge_enabled", "env": "DOUYIN_BRIDGE_ENABLED", "label": "启用抖音私信→微信桥", "category": "抖音桥", "type": "checkbox", "description": "需要同时开启抖音浏览器并在可见浏览器扫码登录；可同时监听多个已绑定会话。"},
+    {"key": "douyin_bridge_wechat_enabled", "env": "DOUYIN_BRIDGE_WECHAT_ENABLED", "label": "启用微信表情→抖音", "category": "抖音桥", "type": "checkbox", "description": "与普通私聊回复开关隔离；只对已绑定的一对一微信联系人生效，群聊不支持。"},
+    {"key": "douyin_bridge_wechat_auto_sticker", "env": "DOUYIN_BRIDGE_WECHAT_AUTO_STICKER", "label": "私聊表情自动转抖音", "category": "抖音桥", "type": "checkbox", "description": "和普通私聊回复彻底独立；开启后微信表情无需指令直接转发，关闭时必须说「转到抖音」。"},
+    {"key": "douyin_bridge_conversation", "env": "DOUYIN_BRIDGE_CONVERSATION", "label": "默认抖音会话", "category": "抖音桥", "type": "text", "description": "绑定表为空时的兜底会话名；多用户时以控制台绑定记录为准。"},
+    {"key": "douyin_bridge_dry_run", "env": "DOUYIN_BRIDGE_DRY_RUN", "label": "只准备不发送（dry-run）", "category": "抖音桥", "type": "checkbox", "description": "开启时只下载并校验媒体，不点击微信发送；确认链路后再关闭。"},
+    {"key": "douyin_bridge_reply_enabled", "env": "DOUYIN_BRIDGE_REPLY_ENABLED", "label": "在抖音回执", "category": "抖音桥", "type": "checkbox", "description": "处理完成后在抖音私信回一句；微信是否真的收到只看数据库回读。"},
+    {"key": "douyin_bridge_chat_enabled", "env": "DOUYIN_BRIDGE_CHAT_ENABLED", "label": "允许抖音普通聊天", "category": "抖音桥", "type": "checkbox", "description": "默认只处理明确指令；开启后非指令消息也会让模型接话。"},
+    {"key": "douyin_bridge_poll_seconds", "env": "DOUYIN_BRIDGE_POLL_SECONDS", "label": "私信轮询间隔（秒）", "category": "抖音桥", "type": "number", "description": "默认 6 秒；太短会增加风控风险。"},
+    {"key": "douyin_bridge_context_seconds", "env": "DOUYIN_BRIDGE_CONTEXT_SECONDS", "label": "媒体上下文有效期（秒）", "category": "抖音桥", "type": "number", "description": "先发表情包/视频、后说“转到微信”时，两句话的最大间隔。"},
+    {"key": "douyin_bridge_max_jobs_per_hour", "env": "DOUYIN_BRIDGE_MAX_JOBS_PER_HOUR", "label": "每小时转移上限", "category": "抖音桥", "type": "number", "description": "已成功投递的任务数上限。"},
+    {"key": "douyin_bridge_max_video_mb", "env": "DOUYIN_BRIDGE_MAX_VIDEO_MB", "label": "视频大小上限（MB）", "category": "抖音桥", "type": "number", "description": "超过上限直接拒绝下载。"},
+    {"key": "dtk_base_url", "env": "DTK_BASE_URL", "label": "DTK 解析服务地址", "category": "抖音桥", "type": "text", "description": "自建 Douyin_TikTok_Download_API 根地址，例如 http://127.0.0.1:8000。"},
+    {"key": "dtk_api_key", "env": "DTK_API_KEY", "label": "DTK API Key", "category": "抖音桥", "type": "password", "secret": True, "description": "留空保持原值；v5 使用 Bearer / X-API-Key。"},
+    {"key": "dtk_timeout_seconds", "env": "DTK_TIMEOUT_SECONDS", "label": "DTK 超时（秒）", "category": "抖音桥", "type": "number", "description": "单次解析和下载的超时时间。"},
+    {"key": "dtk_parse_wait_seconds", "env": "DTK_PARSE_WAIT_SECONDS", "label": "DTK 同步等待（秒）", "category": "抖音桥", "type": "number", "description": "0 表示只提交任务后轮询。"},
+    {"key": "bilibili_enabled", "env": "BILIBILI_ENABLED", "label": "启用 B 站链接导出", "category": "抖音桥", "type": "checkbox", "description": "抖音或微信里收到 B 站视频链接时，下载 DASH 流并合并为无水印 MP4。"},
+    {"key": "bilibili_sessdata", "env": "BILIBILI_SESSDATA", "label": "B 站 SESSDATA", "category": "抖音桥", "type": "password", "secret": True, "description": "登录 Cookie，1080P+/4K 需要；留空保持原值，不写日志。"},
+    {"key": "bilibili_max_video_mb", "env": "BILIBILI_MAX_VIDEO_MB", "label": "B 站视频大小上限（MB）", "category": "抖音桥", "type": "number", "description": "下载和导出 MP4 的本地大小上限。"},
+    {"key": "ffmpeg_path", "env": "FFMPEG_PATH", "label": "ffmpeg 路径", "category": "抖音桥", "type": "text", "description": "B 站 DASH 音视频合并使用，默认 ffmpeg。"},
+    {"key": "douyin_bridge_max_sticker_mb", "env": "DOUYIN_BRIDGE_MAX_STICKER_MB", "label": "表情包大小上限（MB）", "category": "抖音桥", "type": "number", "description": "超过上限直接拒绝下载。"},
+    {"key": "douyin_bridge_max_album_images", "env": "DOUYIN_BRIDGE_MAX_ALBUM_IMAGES", "label": "图集最多转发张数", "category": "抖音桥", "type": "number", "description": "抖音图文/图集转发到微信时最多发送的图片张数，默认 9。"},
+    {"key": "douyin_bridge_media_dir", "env": "DOUYIN_BRIDGE_MEDIA_DIR", "label": "媒体落盘目录", "category": "抖音桥", "type": "text", "description": "建议放在本机私有目录，并限制权限。"},
+    {"key": "douyin_bridge_media_retention_hours", "env": "DOUYIN_BRIDGE_MEDIA_RETENTION_HOURS", "label": "媒体保留时长（小时）", "category": "抖音桥", "type": "number", "description": "发送成功的媒体会立即删除；失败/中断的残留文件超过该时长后定期清理，默认 2 小时。"},
+    {"key": "douyin_bridge_card_click_resolve", "env": "DOUYIN_BRIDGE_CARD_CLICK_RESOLVE", "label": "点开卡片反查视频", "category": "抖音桥", "type": "checkbox", "description": "默认关闭；卡片点击取链接尚不完整，关闭时卡片会让用户补发视频链接。"},
+    {"key": "douyin_bridge_quiet_hours", "env": "DOUYIN_BRIDGE_QUIET_HOURS", "label": "抖音桥静默时段", "category": "抖音桥", "type": "text", "description": "仅限制普通聊天回复，不阻止用户主动发起的转移。"},
+    {"key": "douyin_bridge_watchdog_enabled", "env": "DOUYIN_BRIDGE_WATCHDOG_ENABLED", "label": "页面卡死自动恢复", "category": "抖音桥", "type": "checkbox", "description": "连续多轮只有身份确认失败时自动重载聊天页；仍失败再重启无头浏览器，最后才重启控制台。验证码/未登录只报警不自动重试。"},
+    {"key": "douyin_bridge_watchdog_identity_threshold", "env": "DOUYIN_BRIDGE_WATCHDOG_IDENTITY_THRESHOLD", "label": "连续失败轮数阈值", "category": "抖音桥", "type": "number", "description": "连续多少轮「所有点开的会话都 CHAT_IDENTITY_UNCONFIRMED」才触发恢复，默认 3。"},
+    {"key": "douyin_bridge_watchdog_console_restart", "env": "DOUYIN_BRIDGE_WATCHDOG_CONSOLE_RESTART", "label": "允许自动重启控制台", "category": "抖音桥", "type": "checkbox", "description": "重载页面和重启浏览器都无效时，允许看门狗调用 scripts/restart-desktop.sh 重启控制台，日志保留。"},
+    {"key": "douyin_bridge_watchdog_console_cooldown_seconds", "env": "DOUYIN_BRIDGE_WATCHDOG_CONSOLE_COOLDOWN_SECONDS", "label": "自动重启控制台间隔（秒）", "category": "抖音桥", "type": "number", "description": "两次自动重启控制台的最小间隔，默认 1800；24 小时内最多 5 次。"},
     {"key": "web_search_enabled", "env": "WEB_SEARCH_ENABLED", "label": "启用联网搜索", "category": "联网", "type": "checkbox", "description": "群友明确提问时才进入搜索流程。"},
     {"key": "web_search_provider", "env": "WEB_SEARCH_PROVIDER", "label": "搜索服务", "category": "联网", "type": "select", "options": ["none", "deepseek-search-api", "brave", "tavily", "searxng"], "description": "可使用 DSH 的 deepseek-search-api 中转。"},
     {"key": "web_search_api_key", "env": "WEB_SEARCH_API_KEY", "label": "搜索 API Key", "category": "联网", "type": "password", "secret": True, "description": "留空保持原值；DSH 中转通常填 lan。"},
@@ -175,7 +205,7 @@ CONFIG_SCHEMA.extend(config_fields())
 mark_schema(CONFIG_SCHEMA)
 
 AUTH_COOKIE = "wechat_agent_token"
-PAGE_PATHS = frozenset({"/", "/members", "/groups", "/memory", "/settings", "/logs", "/platform"})
+PAGE_PATHS = frozenset({"/", "/members", "/groups", "/memory", "/settings", "/logs", "/platform", "/douyin-bridge"})
 #: Every JSON route stays bounded; persona bundles may carry a whole folder.
 JSON_BODY_LIMIT = 1_000_000
 PERSONA_UPLOAD_BODY_LIMIT = 12_000_000
@@ -223,6 +253,12 @@ class DesktopController:
         if previous_automation is not None:
             try:
                 previous_automation.stop_worker()
+            except Exception:
+                pass
+        previous_bridge = getattr(self, "douyin_bridge", None)
+        if previous_bridge is not None:
+            try:
+                previous_bridge.stop()
             except Exception:
                 pass
         self._storage = Storage(settings)
@@ -282,6 +318,14 @@ class DesktopController:
             from .llm import LLMClient
 
             llm = LLMClient(settings)
+        self.douyin_bridge = None
+        if settings.douyin_bridge_enabled:
+            self.douyin_bridge = DouyinBridgeService(
+                self._storage,
+                settings,
+                adapter=self._platforms.adapter("douyin"),
+                llm=llm,
+            )
         self._platform_automation = PlatformAutomation(
             self._storage,
             settings,
@@ -298,6 +342,7 @@ class DesktopController:
                 platform_service=self._platforms,
                 platform_automation=self._platform_automation,
                 platform_memory=self._platform_memory,
+                douyin_bridge=self.douyin_bridge,
             )
         else:
             self._agent_factory = self._agent_factory_override
@@ -767,6 +812,96 @@ class DesktopController:
         result["status"] = self._platform_automation.status()
         return result
 
+    # -- Douyin private-message -> WeChat bridge ---------------------------
+    def _douyin_bridge(self) -> DouyinBridgeService:
+        bridge = getattr(self, "douyin_bridge", None)
+        if bridge is None:
+            raise ValueError("douyin_bridge_not_enabled")
+        return bridge
+
+    def douyin_bridge_status(self) -> dict[str, object]:
+        bridge = getattr(self, "douyin_bridge", None)
+        if bridge is None:
+            return {"enabled": False, "reason": "DOUYIN_BRIDGE_ENABLED=false"}
+        return bridge.status()
+
+    def douyin_bridge_messages(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return bridge.read_conversation(str(payload.get("peer_name") or ""), limit=int(payload.get("limit") or 200))
+
+    def forward_douyin_bridge_messages(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        indexes = payload.get("indexes") or []
+        if not isinstance(indexes, list):
+            raise ValueError("indexes_must_be_list")
+        return bridge.forward_conversation_messages(
+            str(payload.get("peer_name") or ""),
+            [int(value) for value in indexes],
+        )
+
+    def douyin_bridge_jobs(self, limit: int = 50) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        jobs = bridge.jobs(limit=limit)
+        return {"jobs": jobs, "count": len(jobs)}
+
+    def douyin_bridge_bindings(self) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return {"bindings": bridge.bindings()}
+
+    def douyin_bridge_conversations(self, refresh: bool = False) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return {"conversations": bridge.list_conversations(refresh=refresh)}
+
+    def douyin_bridge_dom_probe(self) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return bridge.dom_probe()
+
+    def create_douyin_bridge_code(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return bridge.create_code(payload)
+
+    def bind_douyin_bridge(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        binding = bridge.bind_manual(payload)
+        return {"binding": binding, "bindings": bridge.bindings()}
+
+    def delete_douyin_bridge_binding(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        # API contract: {"binding_id": <int>}.  Keep one name only.
+        binding_id = payload.get("binding_id")
+        if binding_id in (None, ""):
+            raise ValueError("binding_id_required")
+        return bridge.delete_binding(binding_id)
+
+    def probe_douyin_bridge_open(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return bridge.probe_open(str(payload.get("peer_name") or ""))
+
+    def run_douyin_bridge(self) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        # Playwright's sync page belongs to the bridge poll thread; the
+        # console only wakes that thread instead of touching the page.
+        started = bool(getattr(bridge, "_threads", None))
+        if started:
+            bridge.request_poll()
+        return {"requested": started, "status": bridge.status()}
+
+    def calibrate_douyin_bridge(self) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return {"calibration": bridge.calibrate(), "status": bridge.status()}
+
+    def retry_douyin_bridge_job(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return bridge.retry_job(str(payload.get("job_id") or ""))
+
+    def resend_douyin_bridge_job(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return bridge.resend_job(str(payload.get("job_id") or ""))
+
+    def cancel_douyin_bridge_job(self, payload: dict[str, object]) -> dict[str, object]:
+        bridge = self._douyin_bridge()
+        return bridge.cancel_job(str(payload.get("job_id") or ""))
+
     def close_platforms(self) -> None:
         automation = getattr(self, "_platform_automation", None)
         if automation is not None:
@@ -872,6 +1007,28 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, 400)
         elif path == "/api/platform-proactive":
             self._send_json(self.server.controller.platform_proactive_status())
+        elif path == "/api/douyin-bridge":
+            self._send_json(self.server.controller.douyin_bridge_status())
+        elif path == "/api/douyin-bridge/jobs":
+            query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
+            try:
+                self._send_json(self.server.controller.douyin_bridge_jobs(limit=int(query.get("limit", 50))))
+            except (TypeError, ValueError) as exc:
+                self._send_json({"error": str(exc)}, 400)
+        elif path == "/api/douyin-bridge/bindings":
+            self._send_json(self.server.controller.douyin_bridge_bindings())
+        elif path == "/api/douyin-bridge/conversations":
+            query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
+            try:
+                refresh = str(query.get("refresh", "")).lower() in {"1", "true", "yes"}
+                self._send_json(self.server.controller.douyin_bridge_conversations(refresh=refresh))
+            except (RuntimeError, TimeoutError, ValueError) as exc:
+                self._send_json({"error": str(exc), "conversations": []}, 503)
+        elif path == "/api/douyin-bridge/dom-probe":
+            try:
+                self._send_json(self.server.controller.douyin_bridge_dom_probe())
+            except (RuntimeError, TimeoutError, ValueError) as exc:
+                self._send_json({"error": str(exc)}, 503)
         else:
             self._send_json({"error": "not_found"}, 404)
 
@@ -972,6 +1129,28 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 payload = self.server.controller.delete_platform_identity(body)
             elif path == "/api/platform-proactive/run":
                 payload = self.server.controller.run_platform_proactive()
+            elif path == "/api/douyin-bridge/codes":
+                payload = self.server.controller.create_douyin_bridge_code(body)
+            elif path == "/api/douyin-bridge/bindings":
+                payload = self.server.controller.bind_douyin_bridge(body)
+            elif path == "/api/douyin-bridge/bindings/delete":
+                payload = self.server.controller.delete_douyin_bridge_binding(body)
+            elif path == "/api/douyin-bridge/run":
+                payload = self.server.controller.run_douyin_bridge()
+            elif path == "/api/douyin-bridge/open":
+                payload = self.server.controller.probe_douyin_bridge_open(body)
+            elif path == "/api/douyin-bridge/messages":
+                payload = self.server.controller.douyin_bridge_messages(body)
+            elif path == "/api/douyin-bridge/forward":
+                payload = self.server.controller.forward_douyin_bridge_messages(body)
+            elif path == "/api/douyin-bridge/calibrate":
+                payload = self.server.controller.calibrate_douyin_bridge()
+            elif path == "/api/douyin-bridge/jobs/retry":
+                payload = self.server.controller.retry_douyin_bridge_job(body)
+            elif path == "/api/douyin-bridge/jobs/resend":
+                payload = self.server.controller.resend_douyin_bridge_job(body)
+            elif path == "/api/douyin-bridge/jobs/cancel":
+                payload = self.server.controller.cancel_douyin_bridge_job(body)
             else:
                 self._send_json({"error": "not_found"}, 404)
                 return
@@ -1103,6 +1282,8 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 body = web.logs()
             elif path == "/platform":
                 body = web.platform()
+            elif path == "/douyin-bridge":
+                body = web.douyin_bridge_page()
             else:  # pragma: no cover - ``_is_page`` already narrowed this
                 body = web.not_found("没有这个页面。")
         except KeyError:

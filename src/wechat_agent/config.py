@@ -354,6 +354,71 @@ class Settings(BaseSettings):
     platform_proactive_keywords: Annotated[list[str], NoDecode] = Field(default_factory=list)
     platform_quiet_hours: str = "23:00-08:00"
 
+    # Douyin private-message -> WeChat media bridge.  The Douyin side is a
+    # visible Playwright tab on the same persistent profile as the public
+    # platform connector; it is off by default and only ever watches one
+    # explicitly configured conversation.  The WeChat side reuses the Linux
+    # backend's send/verify ledger, so a delivery is never reported as sent
+    # without a database read-back.
+    douyin_bridge_enabled: bool = False
+    # Cross-software sticker exchange is a separate switch from ordinary
+    # WeChat private-chat replies (WECHAT_PRIVATE_REPLY_ENABLED).  Only
+    # one-to-one chats are eligible; group ids are rejected at binding time.
+    douyin_bridge_wechat_enabled: bool = True
+    douyin_bridge_wechat_auto_sticker: bool = True
+    # Display name or stable conversation id of the only watched Douyin chat.
+    douyin_bridge_conversation: str = ""
+    # Local audit label for the Douyin account the browser is signed in as.
+    douyin_bridge_account_id: str = ""
+    # Preparing a transfer is safe; delivering it is a separate opt-in.
+    douyin_bridge_dry_run: bool = True
+    douyin_bridge_reply_enabled: bool = True
+    douyin_bridge_chat_enabled: bool = False
+    douyin_bridge_poll_seconds: float = Field(default=6.0, ge=3, le=120)
+    douyin_bridge_context_seconds: int = Field(default=300, ge=30, le=3600)
+    douyin_bridge_max_jobs_per_hour: int = Field(default=60, ge=1, le=200)
+    douyin_bridge_bindings_per_poll: int = Field(default=3, ge=1, le=20)
+    douyin_bridge_list_scan: bool = True
+    douyin_bridge_full_scan_seconds: int = Field(default=600, ge=60, le=86400)
+    douyin_bridge_scan_limit: int = Field(default=200, ge=30, le=500)
+    douyin_bridge_max_video_mb: int = Field(default=500, ge=1, le=4096)
+    douyin_bridge_max_sticker_mb: int = Field(default=10, ge=1, le=50)
+    douyin_bridge_max_album_images: int = Field(default=9, ge=1, le=35)
+    douyin_bridge_media_dir: Path = Path("state/douyin-bridge")
+    # Delivered media is removed immediately; anything left over (failed or
+    # interrupted jobs, temp files) is swept after this many hours.
+    douyin_bridge_media_retention_hours: int = Field(default=2, ge=1, le=720)
+    douyin_bridge_chat_url: str = "https://www.douyin.com/chat"
+    # A forwarded video card sometimes has no aweme id in the DOM.  Clicking it
+    # can reveal the real page, but it also navigates away from the chat; keep
+    # that fallback opt-in and prefer asking for a link.
+    douyin_bridge_card_click_resolve: bool = False
+    douyin_bridge_quiet_hours: str = "23:00-08:00"
+    # The chat tab lives for days at a time.  It can stop switching chats
+    # without logging out or showing a challenge, which used to surface only as
+    # an endless run of CHAT_IDENTITY_UNCONFIRMED warnings while no message was
+    # forwarded.  The watchdog turns that silent stall into a graded recovery:
+    # reload /chat, then relaunch the persistent browser (same profile, no new
+    # QR scan), and only then a rate-limited console restart.
+    douyin_bridge_watchdog_enabled: bool = True
+    douyin_bridge_watchdog_identity_threshold: int = Field(default=3, ge=2, le=20)
+    douyin_bridge_watchdog_console_restart: bool = True
+    douyin_bridge_watchdog_console_cooldown_seconds: int = Field(default=1800, ge=300, le=21600)
+    # Evil0ctal/Douyin_TikTok_Download_API-compatible endpoint.  It is called
+    # only for the clean stream the platform already publishes; the bridge
+    # never removes a watermark from downloaded pixels.
+    dtk_base_url: str = ""
+    dtk_api_key: str = ""
+    dtk_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    dtk_parse_wait_seconds: int = Field(default=20, ge=0, le=30)
+    # Bilibili link export.  The web DASH streams are watermark-free; SESSDATA
+    # is optional and only needed for higher qualities / logged-in content.
+    bilibili_enabled: bool = True
+    bilibili_sessdata: str = ""
+    bilibili_max_video_mb: int = Field(default=500, ge=1, le=4096)
+    bilibili_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    ffmpeg_path: str = "ffmpeg"
+
     # Optional online research. Search and fetch are separate switches. An
     # empty fetch-domain list allows public HTTP(S) hosts; setting the list
     # narrows retrieval to those domains. Local and private address targets
@@ -480,14 +545,19 @@ class Settings(BaseSettings):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
 
-    @field_validator("proactive_quiet_hours", "platform_quiet_hours", mode="before")
+    @field_validator(
+        "proactive_quiet_hours",
+        "platform_quiet_hours",
+        "douyin_bridge_quiet_hours",
+        mode="before",
+    )
     @classmethod
     def normalize_quiet_hours(cls, value: object, info) -> str:
-        label = (
-            "安静时段（PROACTIVE_QUIET_HOURS）"
-            if info.field_name == "proactive_quiet_hours"
-            else "平台静默时段（PLATFORM_QUIET_HOURS）"
-        )
+        label = {
+            "proactive_quiet_hours": "安静时段（PROACTIVE_QUIET_HOURS）",
+            "platform_quiet_hours": "平台静默时段（PLATFORM_QUIET_HOURS）",
+            "douyin_bridge_quiet_hours": "抖音桥静默时段（DOUYIN_BRIDGE_QUIET_HOURS）",
+        }[info.field_name]
         return _normalize_quiet_hours(value, label)
 
     @model_validator(mode="after")

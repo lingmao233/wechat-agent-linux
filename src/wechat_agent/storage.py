@@ -374,6 +374,7 @@ class Storage:
 
     def init_schema(self) -> None:
         from . import memory_schema, reply_jobs  # register additive tables before create_all
+        from .douyin_bridge import models as _douyin_bridge_models  # noqa: F401 - register bridge tables
         Base.metadata.create_all(self.engine)
         self._ensure_legacy_columns()
         from .memory_jobs import initialize_schema

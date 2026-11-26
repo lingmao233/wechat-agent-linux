@@ -346,6 +346,14 @@ class AtspiUI:
                 return True
         return False
 
+    def _wait_chat_header(self, name: str, timeout: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._chat_header_matches(name):
+                return True
+            time.sleep(0.1)
+        return False
+
     def _input(self):
         candidates = []
         for node in self._nodes():
@@ -472,6 +480,164 @@ class AtspiUI:
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=2)
+
+    def _wait_file_dialog(self, *, timeout: float = 6.0):
+        deadline = time.monotonic() + timeout
+        while True:
+            for node in self._nodes():
+                try:
+                    if (node.getRoleName() == "dialog"
+                            and (node.name or "").strip() in {"选择文件", "打开", "Open"}
+                            and self._visible(node)):
+                        return node
+                except Exception:
+                    continue
+            if time.monotonic() >= deadline:
+                raise BackendError("FILE_DIALOG_NOT_FOUND", "微信没有打开文件选择框，未发送文件")
+            time.sleep(0.05)
+
+    def _dialog_editable(self, dialog):
+        fallback = None
+        for node in self._nodes(dialog):
+            try:
+                if node.getRoleName() not in {"text", "entry"} or not self._visible(node):
+                    continue
+                node.queryEditableText()
+                if "文件名称" in (node.name or ""):
+                    return node
+                fallback = fallback or node
+            except Exception:
+                continue
+        if fallback is None:
+            raise BackendError("FILE_NAME_FIELD_NOT_FOUND", "文件选择框里没有文件名输入框")
+        return fallback
+
+    def _dialog_button(self, dialog, names: tuple[str, ...]):
+        for node in self._nodes(dialog):
+            try:
+                if (node.getRoleName() == "push button"
+                        and (node.name or "").strip() in names
+                        and self._visible(node)):
+                    return node
+            except Exception:
+                continue
+        raise BackendError("FILE_DIALOG_BUTTON_NOT_FOUND", "文件选择框里没有确认按钮")
+
+    def _file_dialog_present(self) -> bool:
+        for node in self._nodes():
+            try:
+                if (node.getRoleName() == "dialog"
+                        and (node.name or "").strip() == "选择文件"
+                        and self._visible(node)):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def send_file(self, chat: ChatInfo, path: str) -> None:
+        """Send a local document through WeChat's native file chooser.
+
+        The filename field is written through AT-SPI and read back before the
+        dialog is accepted.  The caller verifies the resulting appmsg (type 6,
+        title == basename) in the database; this method never reports success
+        by itself.
+        """
+
+        file_path = Path(path).expanduser().resolve()
+        if not file_path.is_file() or file_path.stat().st_size <= 0:
+            raise BackendError("FILE_MISSING", "待发送文件不存在或为空")
+        self.open_chat(chat)
+        entry = self._input()
+        if entry.queryText().getText(0, -1).strip():
+            raise BackendError("INPUT_OCCUPIED", "输入框已有草稿，未打开文件选择框")
+        try:
+            if self._send_button().getState().contains(self.atspi.STATE_ENABLED):
+                raise BackendError("INPUT_OCCUPIED", "输入框已有附件草稿，未打开文件选择框")
+        except BackendError as exc:
+            if exc.code == "INPUT_OCCUPIED":
+                raise
+        except Exception:
+            pass
+        button = self._find(role="push button", names=("发送文件", "Send File", "Send file"))
+        if button is None:
+            raise BackendError("FILE_BUTTON_NOT_FOUND", "当前微信没有可识别的「发送文件」按钮")
+        self._send_guard()
+        self._click(button)
+        dialog = self._wait_file_dialog()
+        confirmed = False
+        try:
+            self._send_guard()
+            if not self._wait_chat_header(chat.name, 1.0):
+                raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件选择期间当前会话发生变化")
+            field = self._dialog_editable(dialog)
+            field.queryEditableText().setTextContents(str(file_path))
+            time.sleep(0.2)
+            actual = field.queryText().getText(0, -1)
+            if file_path.name not in actual:
+                # Some GTK builds ignore setTextContents on this field; type
+                # the absolute path as real key events and read it back again.
+                self._click(field)
+                self._command(["xdotool", "key", "--clearmodifiers", "ctrl+a"])
+                self._command(["xdotool", "type", "--clearmodifiers", "--delay", "8", str(file_path)])
+                time.sleep(0.2)
+                actual = field.queryText().getText(0, -1)
+            if file_path.name not in actual:
+                raise BackendError("FILE_NAME_UNCONFIRMED", "文件选择框回读不到目标文件名，未点击打开")
+            open_button = self._dialog_button(dialog, ("打开", "Open"))
+            self._send_guard()
+            if not self._wait_chat_header(chat.name, 1.0):
+                raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件发送前当前会话发生变化")
+            self._click(open_button)
+            confirmed = True
+            deadline = time.monotonic() + 15
+            while self._file_dialog_present():
+                if time.monotonic() >= deadline:
+                    raise BackendError("FILE_DIALOG_STUCK", "文件选择框没有关闭，发送结果不确定")
+                time.sleep(0.05)
+            # A few clients ask for one more confirmation before uploading.
+            time.sleep(0.3)
+            for node in self._nodes():
+                try:
+                    if (node.getRoleName() == "dialog" and self._visible(node)
+                            and any((child.getRoleName() == "push button"
+                                     and (child.name or "").strip() in {"发送", "Send"}
+                                     and self._visible(child))
+                                    for child in self._nodes(node))):
+                        for child in self._nodes(node):
+                            if (child.getRoleName() == "push button"
+                                    and (child.name or "").strip() in {"发送", "Send"}
+                                    and self._visible(child)):
+                                self._send_guard()
+                                self._click(child)
+                                break
+                        break
+                except Exception:
+                    continue
+            # WeChat Linux puts the chosen file in the composer as an
+            # attachment chip and waits for the normal Send button.  If the
+            # client auto-sent it instead, the button is disabled and there is
+            # nothing left to click.
+            time.sleep(0.4)
+            if not self._wait_chat_header(chat.name, 3.0):
+                raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件已选好但当前会话发生变化，未点击发送")
+            send_button = self._send_button()
+            try:
+                enabled = send_button.getState().contains(self.atspi.STATE_ENABLED)
+            except Exception:
+                enabled = False
+            if enabled:
+                self._send_guard()
+                if not self._wait_chat_header(chat.name, 2.0):
+                    raise BackendError("CHAT_IDENTITY_UNCONFIRMED", "文件发送前当前会话发生变化")
+                self._click(send_button)
+                time.sleep(0.5)
+        except Exception:
+            if not confirmed and self._file_dialog_present():
+                try:
+                    self._command(["xdotool", "key", "--clearmodifiers", "Escape"])
+                except BackendError:
+                    log.debug("file_dialog_escape_failed", exc_info=True)
+            raise
 
     def _voice_composer(self, button):
         try:
