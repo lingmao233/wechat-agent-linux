@@ -33,7 +33,7 @@ class BindingService:
     def create_code(self, *, wxid: object, wx_name: object = "") -> dict[str, Any]:
         target = str(wxid or "").strip()
         if not target:
-            raise ValueError("wxid_required")
+            raise ValueError("wxid_placeholder001")
         if target.endswith("@chatroom"):
             raise ValueError("douyin_bridge_private_only")
         if target == self.account_id:
@@ -93,7 +93,7 @@ class BindingService:
         if not conversation:
             raise ValueError("conversation_id_required")
         if not target:
-            raise ValueError("wxid_required")
+            raise ValueError("wxid_placeholder001")
         if target.endswith("@chatroom"):
             raise ValueError("douyin_bridge_private_only")
         display_name = str(wx_name or "").strip()

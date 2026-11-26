@@ -33,9 +33,15 @@ _desktop_thread_lock = threading.Lock()
 
 @contextmanager
 def desktop_lease():
-    """Share the desktop between sends and native transcript conversion."""
-    if not _desktop_thread_lock.acquire(blocking=False):
-        raise BackendError("SEND_BUSY", "微信界面正在处理其他发送或语音转换")
+    """Share the desktop between sends and native transcript conversion.
+
+    The bridge and the normal group/private reply path run in the same process
+    but may be triggered by different threads.  Waiting briefly here is much
+    safer than failing one side with SEND_BUSY: a group reply that loses the
+    race should queue behind the bridge send, not disappear.
+    """
+    if not _desktop_thread_lock.acquire(timeout=12):
+        raise BackendError("SEND_BUSY", "微信界面处理超时，请稍后重试")
     descriptor = None
     try:
         if os.name == "posix":
@@ -71,7 +77,6 @@ class LinuxBackend:
         self._ui_lock = threading.Lock()
         self._connected = False
         self.last_send_result = None
-
         # Optional provider for the Douyin bridge.  A bound private target may
         # be delivered to even when it is not in WECHAT_PRIVATE_CHAT_NAMES; the
         # binding table is the authorization, and the provider is re-read on
@@ -90,6 +95,7 @@ class LinuxBackend:
         except Exception:
             return False
         return str(chat_id or "").strip() in allowed
+
 
     def bind_storage(self, storage) -> None:
         self.storage = storage
@@ -610,10 +616,21 @@ class LinuxBackend:
                 self.last_send_result = SendResult(True, tuple(receipts), message_type, choice["md5"] if choice else "")
                 return self.last_send_result
             except Exception as exc:
-                self.ui.diagnose(getattr(exc, "code", "SEND_FAILED"))
+                code = getattr(exc, "code", type(exc).__name__)
+                # Keep the real failure visible: a third-party exception may
+                # carry a non-string code, and the failure screenshot must not
+                # replace the send error with its own TypeError.
+                log.warning(
+                    "send_failed action_id=%s code=%s error=%s",
+                    action_id, code, exc, exc_info=True,
+                )
+                try:
+                    self.ui.diagnose(str(code))
+                except Exception:
+                    log.debug("send_diagnose_failed action_id=%s", action_id, exc_info=True)
                 with scope_transaction(self.storage, action.account_id, action.group_id) as session:
                     ledger = session.get(LinuxSendRow, action_id)
-                    ledger.status, ledger.error_code, ledger.updated_at = "uncertain", getattr(exc, "code", type(exc).__name__), utc_now()
+                    ledger.status, ledger.error_code, ledger.updated_at = "uncertain", str(code)[:64], utc_now()
                     ledger.lease_until = None
                 raise
             finally:

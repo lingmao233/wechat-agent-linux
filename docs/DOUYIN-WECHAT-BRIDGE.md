@@ -553,12 +553,12 @@ DOUYIN_BRIDGE_DRY_RUN=true
 | 微信 → 抖音 | 微信「测试甲」发 GIF + “转到抖音” → 桥读取微信表情、在抖音弹窗上传；抖音页面出现本号发出的图片；最终 `SEND_MEDIA verified=True, modal_gone=True` |
 | 视频卡片分类 | 真实抖音视频卡片（无文字、`rowText=五颗星`、有播放控件）已分类为 `kind=video`；视频卡片没有 aweme id 时仍会请用户补链接 |
 | 批量 / 多用户 | 单测：两个绑定、两个并发表情任务分别投递到两个 wxid；群绑定被拒绝 |
-| 多用户轮询稳定性 | 真机 9 个绑定：`CHAT_IDENTITY_UNCONFIRMED`（点测试丁后仍是 Ynix）曾让整轮失败；已改为每轮 3 个、单绑定失败跳过、身份不确认重试一次。修复后日志连续三轮 9 个会话全部 `conversation_verified` |
+| 多用户轮询稳定性 | 真机 9 个绑定：`CHAT_IDENTITY_UNCONFIRMED`（点测试丁后仍是 测试成员5）曾让整轮失败；已改为每轮 3 个、单绑定失败跳过、身份不确认重试一次。修复后日志连续三轮 9 个会话全部 `conversation_verified` |
 | 最近一次失败 | 17:40 任务 `STOPPED`：当时存在全局 `STOP` 文件，桥和私聊/群聊回复都被闸门挡住；文件已删除。另两条历史失败分别是微信窗口被挡（`CHAT_NOT_VISIBLE`）和数据库回读未确认（`SEND_UNVERIFIED`） |
 | 批量表情只导出一个 | 根因：列表预览对连续表情不变，第一次打开时 DOM 只挂载了部分行，后续表情被列表扫描跳过。已改为打开后 0.7 秒二次读取，并在有新消息时把该会话保持“热点”20 秒，后续轮询继续打开读取；不同表情会各自建任务 |
 | 20:01 的“发送失败” | 不是桥任务：是 AI 主动群发言（同仁四级一家人）报 `SEND_UNVERIFIED`；全库搜索确认该文本没有出现在任何会话，既没发错也没发成。已关闭空闲主动发言 `PROACTIVE_IDLE_ENABLED=false` |
 | 收件人审计 | 22 条历史任务逐条核对：任务 `target_wxid`、`peer_name` 与绑定完全一致，0 条错配；19 条 delivered 的微信消息 id 也全部能在目标 wxid 的数据库里找到 |
-| “视频发给 lyyyy” | 不是错发：17:32「测试甲」发的 `v.douyin.com/NKmpdBDNXTw/` 投给 wxid_zvlk；17:41「wlagig」又发了同一链接，投给他的绑定 lyyyy。两个用户各发了一次 |
+| “视频发给 lyyyy” | 不是错发：17:32「测试甲」发的 `v.douyin.com/NKmpdBDNXTw/` 投给 wxid_placeholder001；17:41「测试成员6」又发了同一链接，投给他的绑定 lyyyy。两个用户各发了一次 |
 | 乱发“没链接” | 旧逻辑对每个无 aweme id 的视频卡片都回一句提示。已改为自动转发失败静默跳过，并暂时关闭抖音侧回执 `DOUYIN_BRIDGE_REPLY_ENABLED=false` |
 | 群聊回复受抢锁影响 | 微信 `desktop_lease` 原为非阻塞，桥持有 UI 时群回复直接 `SEND_BUSY`。已改为最多等 12 秒；`open_chat` 标题不匹配时重新聚焦并重试一次。修复后暂无新的群回复失败 |
 | 收件人硬校验 | 任务目标 wxid 与绑定不一致直接 `TARGET_MISMATCH`；同名 peer 不再猜绑定；微信同名联系人拒绝绑定；抖音回执核实会话名后才发送 |
@@ -577,11 +577,11 @@ DOUYIN_BRIDGE_DRY_RUN=true
 
 ### 18.1 为什么 `DTK_BASE_URL` 是 `127.0.0.1:18000`
 
-解析**不在**微信虚拟机本地跑。DTK v5 部署在腾讯云 `42.193.142.187`（容器 `dtk-api-1` / `dtk-worker-1` / `dtk-postgres-1` / `dtk-redis-1`），监听容器内 `8000`。微信 VM 上用常驻 SSH 隧道把本机 18000 转发到服务器回环 8000：
+解析**不在**微信虚拟机本地跑。DTK v5 部署在腾讯云 `203.0.113.10`（容器 `dtk-api-1` / `dtk-worker-1` / `dtk-postgres-1` / `dtk-redis-1`），监听容器内 `8000`。微信 VM 上用常驻 SSH 隧道把本机 18000 转发到服务器回环 8000：
 
 ```text
 VM: ~/bin/dtk-tunnel.sh
-  ssh -N -i ~/.ssh/tencent_dtk ... -L 127.0.0.1:18000:127.0.0.1:8000 ubuntu@42.193.142.187
+  ssh -N -i ~/.ssh/tencent_dtk ... -L 127.0.0.1:18000:127.0.0.1:8000 user@example.com
 ```
 
 所以 `.env` 里的 `DTK_BASE_URL=http://127.0.0.1:18000` 只是**隧道在本机的入口**；真正的解析、数据库和抖音身份池都在腾讯云。这样 DTK 的 API Key 和 8000 端口不需要从 VM 直接访问公网。排查顺序：`curl 127.0.0.1:18000/readyz`（VM）→ `docker ps` + `docker port dtk-api-1`（服务器）→ 隧道进程是否还在。
@@ -647,9 +647,9 @@ VM: ~/bin/dtk-tunnel.sh
 ### 18.9 回执发错会话的修复（2026-11-18 晚）
 
 - 现象：一条媒体发送成功、抖音回执「表情包发到你微信了。」之后，同一条抖音会话里又出现一条「发到微信失败：…」，看起来像同一条消息先成功又失败。
-- 原因：桥支持多绑定后，轮询按绑定逐个打开抖音会话；任务回执在 `_drain_jobs()` 里处理，此时当前打开的往往是**最后一个**会话（例如「测试甲」）。`_reply()` 原来直接往“当前会话”发文字，于是别的会话（例如「凌歌」）的失败回执被发到了「测试甲」里，形成“成功后面跟一条失败”。
+- 原因：桥支持多绑定后，轮询按绑定逐个打开抖音会话；任务回执在 `_drain_jobs()` 里处理，此时当前打开的往往是**最后一个**会话（例如「测试甲」）。`_reply()` 原来直接往“当前会话”发文字，于是别的会话（例如「测试成员7」）的失败回执被发到了「测试甲」里，形成“成功后面跟一条失败”。
 - 修复：`process_job()` 的每个回执都带 `conversation=job.peer_name`；`_reply(..., conversation=...)` 在发送前先 `open_conversation(job.peer_name)`，把回执送回任务自己的抖音会话。单测 `test_job_receipt_is_sent_to_the_jobs_own_douyin_conversation` 覆盖。
-- 另一个独立问题（不是回执错乱）：失败那条本身是真的发送失败——绑定的微信联系人（如「凌歌」）不在微信最近会话列表里，全局搜索兜底也没找到唯一联系人，`open_chat` 报 `CHAT_NOT_VISIBLE`。要支持这类“很久没聊”的联系人，需要继续完善微信全局搜索路径；当前只给该会话回失败回执，不会误发到别的会话。
+- 另一个独立问题（不是回执错乱）：失败那条本身是真的发送失败——绑定的微信联系人（如「测试成员7」）不在微信最近会话列表里，全局搜索兜底也没找到唯一联系人，`open_chat` 报 `CHAT_NOT_VISIBLE`。要支持这类“很久没聊”的联系人，需要继续完善微信全局搜索路径；当前只给该会话回失败回执，不会误发到别的会话。
 
 ### 18.10 媒体落盘清理（2026-11-18 晚）
 
@@ -662,33 +662,33 @@ VM: ~/bin/dtk-tunnel.sh
 
 ### 18.11 微信全局搜索 / 侧栏滚动补稳（2026-11-18 晚）
 
-- 现象：很久没聊过的绑定联系人（如「凌歌」）发送时 `open_chat` 报 `CHAT_NOT_VISIBLE`，回执“发到微信失败”。
+- 现象：很久没聊过的绑定联系人（如「测试成员7」）发送时 `open_chat` 报 `CHAT_NOT_VISIBLE`，回执“发到微信失败”。
 - 原因一：微信 Chats 侧栏只渲染约 10 个会话，老联系人不在可见区；
   原因二：全局搜索兜底只等 **1.5 秒**，搜索结果在繁忙机器上常超过这个时间才出现，于是判成“搜索未找到唯一联系人”。
 - 修复：
   1. `open_chat` 先扫侧栏精确项，再走全局搜索（等待放宽到 4 秒，`联系人` 分组下精确匹配，仍拒绝同名歧义）；
   2. 搜索失败后兜底**滚动侧栏**：先滚到顶部，再按页向下滚（鼠标滚轮事件），每步重新扫精确名称，列表不再变化即停止；
   3. 侧栏精确扫描抽成 `_sidebar_chat_candidates()`，搜索/滚动/侧栏三路都只接受精确同名项，点击后仍回读会话标题确认身份。
-- 真机验证：把之前失败的「凌歌」任务重试 → `delivered`；微信 凌歌 会话回读 `local_id=6`、原生表情 `sticker_size=74543`；回执「表情包发到你微信了。」现在出现在**凌歌**的抖音会话里（不再串到测试甲）；发送完成后 3 个本地媒体文件被立即删除。
+- 真机验证：把之前失败的「测试成员7」任务重试 → `delivered`；微信 测试成员7 会话回读 `local_id=6`、原生表情 `sticker_size=74543`；回执「表情包发到你微信了。」现在出现在**测试成员7**的抖音会话里（不再串到测试甲）；发送完成后 3 个本地媒体文件被立即删除。
 - 单测：新增 `test_open_chat_scrolls_sidebar_when_global_search_finds_nothing`、`test_scroll_sidebar_for_chat_finds_a_chat_below_the_fold`；AT-SPI/后端相关 **105 passed**。
 
 ### 18.12 会话身份校验修复：不再把消息读到别的会话（2026-11-18 晚）
 
-- 事故：视频 `v.douyin.com/NKmpdBDNXTw` 在同一时间被建了两个任务，一个按「测试甲」投递成功，另一个被记到「wlagig」名下并发给了它绑定的微信联系人 lyyyy；另有一条表情包也重复建任务后失败。
-- 根因：`open_conversation` 的会话身份校验一直形同虚设——`_JS_ACTIVE` 按 `active/selected` 类名找当前会话，但抖音实际用 `conversationConversationItemcurConversation` 标记当前会话，所以读到的永远是空字符串；旧代码 `if active and active != wanted` 在空串时直接跳过校验。一旦点击没有真正切到目标会话（wlagig 行可能未渲染/坐标滚动），编辑器又因为上一个会话还开着而存在，就会把**上一个会话（测试甲）的消息**读进来、按 wlagig 的绑定建任务 → 发到 lyyyy。
+- 事故：视频 `v.douyin.com/NKmpdBDNXTw` 在同一时间被建了两个任务，一个按「测试甲」投递成功，另一个被记到「测试成员6」名下并发给了它绑定的微信联系人 lyyyy；另有一条表情包也重复建任务后失败。
+- 根因：`open_conversation` 的会话身份校验一直形同虚设——`_JS_ACTIVE` 按 `active/selected` 类名找当前会话，但抖音实际用 `conversationConversationItemcurConversation` 标记当前会话，所以读到的永远是空字符串；旧代码 `if active and active != wanted` 在空串时直接跳过校验。一旦点击没有真正切到目标会话（测试成员6 行可能未渲染/坐标滚动），编辑器又因为上一个会话还开着而存在，就会把**上一个会话（测试甲）的消息**读进来、按 测试成员6 的绑定建任务 → 发到 lyyyy。
 - 修复：
   1. 会话列表/当前会话选择器改为 `...Itemwrapper`，当前会话用 `curConversation` 判定，标题取 `...Itemtitle`；
   2. `open_conversation` 点击后最多重试 3 个落点、每个等待 2.5 秒，**必须**读到当前会话标题等于目标才继续；读到空/不一致直接 `CHAT_IDENTITY_UNCONFIRMED`，不读任何消息；
   3. `read_messages` / `send_text` / `send_media` 前都调用 `_require_active`，身份不符就 fail closed（不读、不发）；
   4. 成功时记录 `douyin_bridge_conversation_verified name=…`，便于审计；新增 `GET /api/douyin-bridge/dom-probe` 只读诊断。
-- 验证（部署后 30 秒）：28 次会话打开全部 `conversation_verified`，`CHAT_IDENTITY_UNCONFIRMED` 0 次、`poll_failed` 0 次；wlagig 会话快照只剩它自己的系统消息，没有再读到测试甲的内容；修复后没有新建任何误归属任务。
+- 验证（部署后 30 秒）：28 次会话打开全部 `conversation_verified`，`CHAT_IDENTITY_UNCONFIRMED` 0 次、`poll_failed` 0 次；测试成员6 会话快照只剩它自己的系统消息，没有再读到测试甲的内容；修复后没有新建任何误归属任务。
 - 说明：已经误发到 lyyyy 的那条视频无法撤回，需要手动删除；导致它的重复任务不会再重放。
 
 ## 19. 2026-11-24：页面卡死看门狗（自动恢复）
 
 ### 19.1 事故与结论
 
-- 现象：2026-11-23 16:08 起，`desktop.log` 每轮都刷 `douyin_bridge_binding_skipped ... CHAT_IDENTITY_UNCONFIRMED`，到 11-24 14:32 累计 3000+ 条。只有当时已打开的「未愁」能通过校验，其余 13 个绑定全部失败，桥 22 小时没有转发任何抖音消息（任务计数停在 delivered 96）。
+- 现象：2026-11-23 16:08 起，`desktop.log` 每轮都刷 `douyin_bridge_binding_skipped ... CHAT_IDENTITY_UNCONFIRMED`，到 11-24 14:32 累计 3000+ 条。只有当时已打开的「测试成员8」能通过校验，其余 13 个绑定全部失败，桥 22 小时没有转发任何抖音消息（任务计数停在 delivered 96）。
 - 关键证据：`/api/douyin-bridge` 的 `chat.connected=true`、`url=https://www.douyin.com/chat`、`calibrated=true`；`/api/douyin-bridge/dom-probe` 能读到会话列表与输入框，页面没有验证码/登录页；日志里没有 captcha/验证/risk 字样。
 - 结论：不是验证码/封号式风控，而是**长时间运行的无头聊天页卡住**（点击会话不再切换，`curConversation` 标记丢失）。身份校验继续 fail closed，于是只报警、不读数。
 - 恢复：手工重启控制台进程（重新拉起 Playwright 浏览器、复用同一 profile）后，14 个绑定全部 `conversation_verified`、`CHAT_IDENTITY_UNCONFIRMED` 归零、无积压补投。

@@ -9,6 +9,7 @@ VISIBLE_SETTINGS: dict[str, tuple[str, ...]] = {
     "微信": (
         "WECHAT_GROUP_NAMES",
         "WECHAT_AI_ALIASES",
+        "WECHAT_BOT_NAME",
         "WECHAT_KEYWORDS",
         "WECHAT_ALLOW_SEND",
         "WECHAT_PRIVATE_REPLY_ENABLED",

@@ -75,14 +75,17 @@ class AliyunTTSProvider(TTSProvider):
         except SpeechError as exc:
             raise VoiceProviderError(_provider_code(exc.code)) from exc
 
-    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None) -> bytes:
+    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None,
+                   rate: float | None = None, instruction: str | None = None) -> bytes:
         from ..speech import SpeechError
         settings = self._effective
         synthesis_input = {
             "text": text, "voice": voice or settings.tts_voice, "format": "wav", "sample_rate": 24000,
-            "rate": settings.tts_rate, "pitch": settings.tts_pitch, "seed": settings.tts_seed,
+            "rate": settings.tts_rate if rate is None else rate,
+            "pitch": settings.tts_pitch, "seed": settings.tts_seed,
         }
-        instruction = settings.tts_singing_instruction if mode == "singing" else settings.tts_instruction
+        if instruction is None:
+            instruction = settings.tts_singing_instruction if mode == "singing" else settings.tts_instruction
         if str(instruction or "").strip():
             synthesis_input["instruction"] = instruction
         if settings.tts_language != "auto":

@@ -22,6 +22,7 @@ import wave
 import httpx
 
 from .tts.base import VoiceProviderError
+from .voice_style import merge_instruction, scaled_rate
 
 MAX_SPEECH_BYTES = 8_000_000
 MAX_REPLY_SECONDS = 55
@@ -427,6 +428,7 @@ class SpeechClip:
     voice: str
     reused: bool = False
     mode: str = "speech"
+    style: str = ""
 
 
 class SpeechReplies:
@@ -475,7 +477,8 @@ class SpeechReplies:
         value = int.from_bytes(hashlib.sha256((event.account_id + "\0" + event.group_id + "\0voice\0" + identity).encode()).digest()[:8], "big") / 2**64
         return value < self.settings.voice_reply_probability
 
-    def prepare(self, text: str, *, account_id: str, group_id: str, mode: str = "speech") -> SpeechClip:
+    def prepare(self, text: str, *, account_id: str, group_id: str, mode: str = "speech",
+                style=None) -> SpeechClip:
         text = text.strip()
         if not text or len(text) > 300 or re.search(r"<[^>]+>|https?://", text):
             raise SpeechError("tts_text_not_suitable")
@@ -486,23 +489,36 @@ class SpeechReplies:
         if mode == "singing" and not bool(getattr(capabilities, "singing", False)):
             raise SpeechError("singing_provider_unsupported")
         settings = self.settings
+        base_instruction = settings.tts_singing_instruction if mode == "singing" else settings.tts_instruction
+        if style is None:
+            style_label = ""
+            rate = float(settings.tts_rate)
+            instruction = base_instruction
+        else:
+            style_label = style.label
+            rate = scaled_rate(settings.tts_rate, style)
+            instruction = merge_instruction(base_instruction, style)
         # The provider owns its own credential/endpoint/model material.  The
         # generic cache version changes when the fingerprint layout changes so
         # clips from the Aliyun-only implementation are never reused blindly.
         material = self.provider.cache_material()
-        fingerprint = json.dumps(
-            [4, mode, str(getattr(self.provider, "provider_id", "")), material, text],
-            ensure_ascii=False, sort_keys=True, default=str,
-        )
+        parts: list[object] = [4, mode, str(getattr(self.provider, "provider_id", "")), material]
+        if style_label:
+            # Styles are opt-in: without one the fingerprint stays byte-for-byte
+            # identical to the previous layout so existing clips keep hitting.
+            parts.append({"style": style_label, "rate": rate, "instruction": instruction})
+        parts.append(text)
+        fingerprint = json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str)
         scope = hashlib.sha256((account_id + "\0" + group_id).encode()).hexdigest()[:16]
         target = settings.voice_reply_cache_dir / scope / (hashlib.sha256(fingerprint.encode()).hexdigest() + ".wav")
         with self._lock:
             try:
-                return SpeechClip(str(target), wave_duration(target), settings.tts_model, settings.tts_voice, True, mode)
+                return SpeechClip(str(target), wave_duration(target), settings.tts_model, settings.tts_voice,
+                                  True, mode, style_label)
             except SpeechError:
                 pass
             try:
-                data = self.provider.synthesize(text, mode=mode)
+                data = self.provider.synthesize(text, mode=mode, rate=rate, instruction=instruction)
             except VoiceProviderError as exc:
                 raise SpeechError(exc.code) from exc
             if not data:
@@ -521,7 +537,8 @@ class SpeechReplies:
                     output_path = singing_temporary
                 duration = wave_duration(output_path)
                 output_path.replace(target)
-                return SpeechClip(str(target), duration, settings.tts_model, settings.tts_voice, False, mode)
+                return SpeechClip(str(target), duration, settings.tts_model, settings.tts_voice, False, mode,
+                                  style_label)
             finally:
                 temporary.unlink(missing_ok=True)
                 if singing_temporary is not None:

@@ -256,7 +256,7 @@ def generate_persona_design(llm: Any, payload: object) -> dict[str, object]:
         include_speech=include_speech,
         include_image=include_image,
     )
-    raw = llm.complete(system, user, temperature=0.65, max_tokens=6_000)
+    raw = llm.complete(system, user, temperature=0.65)
     return parse_persona_design(
         raw,
         fallback_name=name,

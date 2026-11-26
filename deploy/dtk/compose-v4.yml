@@ -1,0 +1,13 @@
+services:
+  dtk:
+    image: evil0ctal/douyin_tiktok_download_api:V4.1.2
+    container_name: dtk-v4
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    # v4 has no API key: never publish this port beyond loopback.  Reach it
+    # from the WeChat VM through an SSH tunnel instead.
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./douyin-web.yaml:/app/crawlers/douyin/web/config.yaml:ro

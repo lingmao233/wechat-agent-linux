@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 
 from .config import Settings
 from .addressee import judge_addressee, opens_with_bot_name, reply_mode
+from .identity import bot_names
 from .image import ImageClient
 from .image_context import select_image_paths
 from .llm import LLMClient
@@ -42,9 +43,32 @@ from .proactive_scheduler import ProactiveScheduler
 from .reaction_images import ReactionImages
 from .voice import VoiceService
 from .speech import SpeechReplies, voice_reply_declined, voice_request_kind
+from .voice_style import resolve as resolve_voice_style
 from .private_welcome import choose_welcome_message, load_sent, save_sent, welcome_key
 
 log = logging.getLogger(__name__)
+
+
+def limit_outbound_text(text: str, limit: int) -> str:
+    """Trim one outgoing message to what the WeChat client can carry.
+
+    The client rejects or silently cuts a message above its own ceiling, so the
+    reply is shortened here instead: prefer the last sentence break inside the
+    budget, and mark a hard cut with an ellipsis that still fits the limit.
+    """
+
+    value = str(text or "")
+    cap = max(0, int(limit or 0))
+    if not cap or len(value) <= cap:
+        return value
+    head = value[:cap]
+    for marker in ("\n", "。", "！", "？", "；"):
+        index = head.rfind(marker)
+        if index >= cap * 0.6:
+            return head[: index + 1].rstrip()
+    if cap <= 1:
+        return "…"
+    return head[: cap - 1].rstrip() + "…"
 
 
 @dataclass(slots=True)
@@ -522,9 +546,8 @@ class WeChatAgent:
         trigger_terms = [
             *self.settings.wechat_ai_aliases,
             *self.settings.wechat_keywords,
+            *bot_names(self.settings),
         ]
-        if self.settings.wechat_self_name.strip():
-            trigger_terms.append(self.settings.wechat_self_name)
         question_hash = self.storage.question_hash(event, trigger_terms)
         claim_event = replace(event, external_message_id=f"scheduled:{event.proactive_window_id}:{event.external_message_id}", source="proactive_scheduler") if event.proactive_window_id else event
         if event.proactive_window_id:
@@ -850,17 +873,7 @@ class WeChatAgent:
             and event.message_type != "voice"
             and self.settings.addressee_gate_enabled
         ):
-            own_names = tuple(
-                dict.fromkeys(
-                    name
-                    for name in (
-                        *self.settings.wechat_ai_aliases,
-                        self.settings.wechat_self_name,
-                        self.settings.persona_name,
-                    )
-                    if str(name or "").strip()
-                )
-            )
+            own_names = tuple(bot_names(self.settings))
             member_names = tuple(
                 dict.fromkeys(
                     item.sender_name for item in context_messages if item.sender_name
@@ -988,6 +1001,9 @@ class WeChatAgent:
                         topic_context=topic_context,
                     )
                 reply_text = reply.text
+                # One WeChat message has a hard character ceiling; keep the
+                # text, its voice rendition and the stored record identical.
+                reply_text = limit_outbound_text(reply_text, self.settings.wechat_max_reply_chars)
                 if proactive and str(reply_text or "").strip().strip("[] ") == "不回复":
                     if event.proactive_window_id:
                         self.scheduler.release(event.proactive_window_id, reason="generator_declined", close=event.media_metadata.get("proactive_mode") == "idle")
@@ -1004,11 +1020,18 @@ class WeChatAgent:
                                                      declined=voice_reply_declined(analysis_text or event.text))):
                     try:
                         speech_mode = "singing" if (requested_voice_kind == "singing" or getattr(reply, "singing_reply", False)) else "speech"
-                        speech_clip = self.speech.prepare(reply_text or "", account_id=event.account_id, group_id=event.group_id, mode=speech_mode)
+                        style = None
+                        if getattr(self.settings, "voice_style_auto", True):
+                            style = resolve_voice_style(getattr(reply, "voice_style", ""), reply_text or "")
+                        speech_clip = self.speech.prepare(reply_text or "", account_id=event.account_id,
+                                                          group_id=event.group_id, mode=speech_mode, style=style)
+                        if speech_clip:
+                            log.info("speech prepared style=%s reused=%s",
+                                     speech_clip.style or "default", speech_clip.reused)
                     except Exception as exc:
                         log.warning("speech preparation unavailable error=%s; using text", getattr(exc, "code", type(exc).__name__))
                 if speech_clip is None and plan is not None and self.reaction_images.should_offer(event):
-                    own_names = {*self.settings.wechat_ai_aliases, self.settings.wechat_self_name, self.settings.persona_name}
+                    own_names = set(bot_names(self.settings))
                     names = [event.member_name, event.group_name, *(item.sender_name for item in context_messages)]
                     if event.reply_to:
                         names.append(event.reply_to.sender_name)
@@ -1466,6 +1489,13 @@ class WeChatAgent:
         # A sender that the UI could not identify is safe for the shared group
         # corpus and group-level AI style, but not for a member profile.
         known_member = self._is_known_member(event)
+        if known_member:
+            try:
+                from .aliases import alias_service
+
+                alias_service(self.memory).observe_self_intro(event)
+            except Exception as exc:
+                log.warning("member self-introduction alias failed error=%s", type(exc).__name__)
         # Long-term facts now come from the analysis thread's judgement
         # (``MemoryRuntime.process_analysis`` -> ``Storage.apply_judged_facts``),
         # not from a keyword pass in the reply path: the reply must not be
@@ -1626,12 +1656,8 @@ class WeChatAgent:
         # The bot's own UI echo can carry its display name instead of
         # "unknown".  Treat the configured identity and aliases as self,
         # otherwise the group AI profile learns from its own replies.
-        bot_names = {
-            str(self.settings.wechat_self_name or "").strip().casefold(),
-            *[str(alias or "").strip().casefold() for alias in self.settings.wechat_ai_aliases],
-        }
-        bot_names.discard("")
-        if sender and sender in bot_names:
+        own_names = {name.casefold() for name in bot_names(self.settings)}
+        if sender and sender in own_names:
             return True
         if sender not in {"unknown", "我", "自己", "me", "you", "you (me)"}:
             return False

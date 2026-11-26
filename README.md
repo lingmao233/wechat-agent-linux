@@ -39,7 +39,7 @@ WECHAT_PLATFORM=linux
 WECHAT_LINUX_DATA_DIR=/home/your-user/xwechat_files/wxid_example_suffix
 WECHAT_ACCOUNT_ID=wxid_example
 WECHAT_GROUP_NAMES=测试群
-WECHAT_LINUX_CHAT_IDS='{"测试群":"123456789@chatroom"}'
+WECHAT_LINUX_CHAT_IDS='{"测试群":"12345678@chatroom"}'
 WECHAT_ALLOW_SEND=false
 ```
 

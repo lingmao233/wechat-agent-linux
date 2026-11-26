@@ -483,6 +483,6 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,su
 .proactive-detail{padding:12px 16px 0}
 .proactive-detail p{margin:5px 0 0;color:var(--ink-soft);font-size:10px;line-height:1.7;overflow-wrap:anywhere}
 @media(max-width:1120px){.boundary-list{grid-template-columns:1fr}.platform-grid{grid-template-columns:1fr}.proactive-facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:780px){.platform-facts{grid-template-columns:1fr 1fr}.allowlist-strip-body{flex-direction:column}.platform-card-actions .btn{flex:1}.browse-results{max-height:520px}}
+@media(max-width:780px){.platform-facts{grid-template-columns:1fr 1fr}.allowlist-strip-body{flex-direction:column}.platform-card-actions .btn{flex:1}.browse-results{max-height:520px}}
 
-.memory-row .memory-snippet{display:block;margin-top:3px;color:var(--ink-soft);font-size:9px;line-height:1.6;overflow-wrap:anywhere}
+.memory-row .memory-snippet{display:block;margin-top:3px;color:var(--ink-soft);font-size:9px;line-height:1.6;overflow-wrap:anywhere}

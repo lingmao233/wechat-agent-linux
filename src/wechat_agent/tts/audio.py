@@ -13,6 +13,16 @@ from .base import VoiceProviderError
 
 MAX_PROVIDER_AUDIO_BYTES = 8_000_000
 
+# Streaming TTS providers send the PCM payload before the length is known, so
+# they leave fixed sentinel values in the RIFF and data sizes.  Only these exact
+# pairs are repaired; a genuinely truncated file keeps its own header and stays
+# invalid, as before.
+_STREAMING_SENTINELS = {
+    (0x7FFFFFBF, 0x7FFFFF9B),  # Qwen-Audio HTTP TTS
+    (0xFFFFFF24, 0xFFFFFF00),  # Fish Audio
+    (0xFFFFFFFF, 0xFFFFFFFF),  # generic "unknown length" writer
+}
+
 
 def complete_streaming_wav(data: bytes) -> bytes:
     """Complete the exact streaming PCM header returned by Qwen's HTTP TTS.
@@ -22,9 +32,9 @@ def complete_streaming_wav(data: bytes) -> bytes:
     """
     if (len(data) >= 44 and data[:4] == b"RIFF" and data[8:16] == b"WAVEfmt "
             and data[36:40] == b"data"
-            and struct.unpack_from("<I", data, 4)[0] == 0x7FFFFFBF
             and struct.unpack_from("<I", data, 16)[0] == 16
-            and struct.unpack_from("<I", data, 40)[0] == 0x7FFFFF9B):
+            and (struct.unpack_from("<I", data, 4)[0],
+                 struct.unpack_from("<I", data, 40)[0]) in _STREAMING_SENTINELS):
         encoding, channels, rate, byte_rate, block, bits = struct.unpack_from("<HHIIHH", data, 20)
         size = len(data) - 44
         if (encoding != 1 or channels not in {1, 2} or bits != 16 or block != channels * 2

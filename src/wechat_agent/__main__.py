@@ -1,3 +1,3 @@
-from .main import main
-
-raise SystemExit(main())
+from .main import main
+
+raise SystemExit(main())

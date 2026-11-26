@@ -8,12 +8,14 @@ from __future__ import annotations
 from .aliyun import AliyunTTSProvider
 from .base import TTSProvider, TTSCapabilities, VoiceProviderError
 from .elevenlabs import ElevenLabsTTSProvider
+from .fish import FishAudioTTSProvider
 from .openai_compat import OpenAICompatibleTTSProvider
 
 PROVIDERS = {
     AliyunTTSProvider.provider_id: AliyunTTSProvider,
     OpenAICompatibleTTSProvider.provider_id: OpenAICompatibleTTSProvider,
     ElevenLabsTTSProvider.provider_id: ElevenLabsTTSProvider,
+    FishAudioTTSProvider.provider_id: FishAudioTTSProvider,
 }
 PROVIDER_IDS = tuple(PROVIDERS)
 
@@ -29,6 +31,7 @@ def build_provider(settings) -> TTSProvider:
 __all__ = [
     "AliyunTTSProvider",
     "ElevenLabsTTSProvider",
+    "FishAudioTTSProvider",
     "OpenAICompatibleTTSProvider",
     "PROVIDERS",
     "PROVIDER_IDS",

@@ -106,7 +106,7 @@ class Narrative:
         if self.runtime.llm and self.settings.llm_api_key:
             try:
                 raw = self.runtime.llm.complete(TIMELINE_SYSTEM, encode({"day": day, "messages": payload}),
-                                               max_tokens=800, timeout_seconds=min(60.0, self.settings.llm_timeout_seconds))
+                                               timeout_seconds=min(60.0, self.settings.llm_timeout_seconds))
                 value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip()) or "{}")
                 summary = str(value.get("summary") or "")[:400]
                 topics = [str(item)[:40] for item in value.get("topics") or []][:12]
@@ -189,7 +189,7 @@ class Narrative:
                 RELATION_SYSTEM,
                 encode({"members": [{"member_id": key, "member_name": value} for key, value in names.items()],
                         "messages": payload}),
-                max_tokens=1200, timeout_seconds=min(60.0, self.settings.llm_timeout_seconds),
+                timeout_seconds=min(60.0, self.settings.llm_timeout_seconds),
             )
             value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip()) or "{}")
         except Exception as exc:

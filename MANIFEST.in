@@ -1,6 +1,7 @@
 include README.md STATUS.md PRD.md requirements.txt
 recursive-include docs *.md
 recursive-include scripts *.py *.sh
+recursive-include deploy *.md *.sh *.yml
 recursive-include personas *.md
 recursive-include migrations *.sql
 recursive-include src/wechat_agent/web/templates *.html

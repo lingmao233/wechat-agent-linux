@@ -1,0 +1,2 @@
+[console_scripts]
+wechat-agent = wechat_agent.main:main

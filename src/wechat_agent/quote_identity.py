@@ -3,7 +3,7 @@
 WeChat's ``<refermsg>`` block does not reliably identify the sender of a quoted
 message when that message came from the bot.  Production case
 ``messages.id=4339`` (2026-11-05 21:01 Beijing) quoted the bot's own line but
-carried ``fromusr=47371124839@chatroom`` (the group id) and
+carried ``fromusr=12345678@chatroom`` (the group id) and
 ``displayname=Away``.  The prompt then treated "Away" as an ordinary member and
 the bot answered "那句又不是我发的".
 
@@ -22,6 +22,7 @@ import unicodedata
 
 from sqlalchemy import select
 
+from .identity import split_names
 from .storage import MessageRow
 
 
@@ -39,10 +40,11 @@ def self_identity_names(settings) -> set[str]:
     be one of them must not be mistaken for the bot.
     """
 
-    names = {
-        str(getattr(settings, "wechat_self_name", "") or ""),
-        str(getattr(settings, "persona_name", "") or ""),
-    }
+    names = [
+        *split_names(getattr(settings, "wechat_self_name", "")),
+        *split_names(getattr(settings, "wechat_bot_name", "")),
+        *split_names(getattr(settings, "persona_name", "")),
+    ]
     return {normalized for name in names if (normalized := normalize_identity(name))}
 
 

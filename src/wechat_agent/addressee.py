@@ -194,7 +194,6 @@ def judge_addressee(
         raw = llm.complete(
             _system_prompt(tuple(str(name).strip() for name in bot_names if str(name).strip())),
             json.dumps(payload, ensure_ascii=False),
-            max_tokens=200,
             timeout_seconds=timeout_seconds,
         )
     except Exception as exc:  # noqa: BLE001 - judge failure must not block replies
@@ -202,7 +201,7 @@ def judge_addressee(
     verdict = parse_verdict(raw)
     # The model sometimes names the bot itself as the target (e.g. "target":
     # "Away") but still writes addressed_to_ai=no, which used to skip a direct
-    # follow-up such as Xi's "我没有包子小鱼" (2026-11-11).  A target that is a
+    # follow-up such as 测试成员2's "我没有包子小鱼" (2026-11-11).  A target that is a
     # configured bot name is unambiguous: it is addressed to the bot.
     bot_keys = {str(name).strip().casefold() for name in bot_names if str(name).strip()}
     if verdict.target and verdict.target.strip().casefold() in bot_keys:
@@ -221,7 +220,7 @@ def opens_with_bot_name(text: object, bot_names: tuple[str, ...] | list[str] | N
 
     A vocative at the very start is the strongest textual address signal.  It
     overrides a hesitant judge on keyword-triggered messages, so a genuine
-    ``小鱼 我说的是烛火`` is still answered while an unrelated sentence that
+    ``小鱼 我说的是测试成员4`` is still answered while an unrelated sentence that
     merely contains the name is not.
     """
 

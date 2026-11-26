@@ -82,7 +82,14 @@ class TTSProvider:
     def cache_material(self) -> dict[str, object]:
         raise NotImplementedError
 
-    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None) -> bytes:
+    def synthesize(self, text: str, *, mode: str = "speech", voice: str | None = None,
+                   rate: float | None = None, instruction: str | None = None) -> bytes:
+        """Render one clip.
+
+        ``rate`` and ``instruction`` are per-call overrides supplied by the
+        speaking-style layer; ``None`` keeps the configured baseline so a
+        provider works unchanged when styles are disabled.
+        """
         raise NotImplementedError
 
     def clone(self, audio: bytes, *, name: str, language: str) -> dict[str, object]:

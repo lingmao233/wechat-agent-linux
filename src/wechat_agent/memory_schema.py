@@ -383,6 +383,31 @@ class MemberAddressRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class MemberAliasRow(Base):
+    """A surface form that points at one member.
+
+    Nicknames change, people use real names, pinyin initials (``czx``) and
+    homophones (``测试成员12`` for ``测试成员11``).  The resolver reads this table plus
+    the current display names; it never equates two different ``member_id``s
+    from a display label alone.  Rows are scoped per account and group.
+    """
+
+    __tablename__ = "member_aliases"
+    account_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    group_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    member_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    alias_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    alias: Mapped[str] = mapped_column(String(64))
+    # nickname | real_name | initials | homophone | manual | learned
+    alias_type: Mapped[str] = mapped_column(String(24), default="learned")
+    # message | self_intro | mention | claim | manual | model | nickname
+    source: Mapped[str] = mapped_column(String(24), default="model")
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    evidence_message_id: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class JudgeBudgetRow(Base):
     """Durable per-group daily counter for model judgements.
 
